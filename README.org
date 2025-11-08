@@ -1,1 +1,3 @@
-# org-roam-annotation-import
+* org-roam-annotation-import
+
+Inspired by [[https://github.com/CountGreven/org-readwise][CountGreven's org-readwise]]. An Emacs package to facilitate importing annotations into org-roam. Separating the actual insertion from different backends to import annotations from. The first goal is to support both Wallabag annotations as well as KOReader metadata. Very experimental with no support.
