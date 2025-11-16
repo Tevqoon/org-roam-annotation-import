@@ -45,84 +45,26 @@
   :group 'annotation
   :type 'integer)
 
+(setq annotation-debug-level 2)
+
 (defun annotation-debug (level msg &rest args)
   "Print debug message MSG at debug LEVEL with ARGS."
-  (when (>= readwise-debug-level level)
-    (apply 'message (concat "[Readwise] " msg) args)))
+  (when (>= annotation-debug-level level)
+    (apply 'message (concat "[Annotations] " msg) args)))
 
-(defun annotation--sanitize-filename (title)
-  "Convert TITLE to a safe filename."
-  (let ((sanitized (replace-regexp-in-string "[^[:alnum:][:space:]-]" "" title)))
-    (replace-regexp-in-string "\\s+" "-" (string-trim sanitized))))
-
-(defun annotation--get-target-for-entry (entry)
-  "For a given ENTRY, find the node containing it, creating it if need be.
-Assumes that the entry has at least one relevant annotation. In particular,
-if a file needs to be created, it will be, irrespective of if the annotations
-it contains is an empty list.
-
-The target node can either be a file or a heading. We return the level
-of the heading, defaulting to nil if we are at the top level,
-mirroring `org-current-level'.
-
-To select the node, the following order is applied:
-1. The :url attribute, if extant, using `org-roam-node-from-ref'.
-2. The sanitized :title attribute, if extant.
-3. In case none of the attributes are present, we return nil silently.
-   A message is logged. This is taken to mean that no annotations should
-   be inserted. Something went wrong if we have neither url nor title.
-
-If a new node is created, it gets the filetag #annotations for roam-db interops."
-  
-  (let* ((url (plist-get entry :url))
-         (title (plist-get entry :title))
-         (node (when url (org-roam-node-from-ref url)))
-         (node-file nil)
-         (node-id nil)
-         (heading-level nil))
-    (cond
-     ;; Case 1: Node exists via URL lookup
-     (node
-      (setq node-file (org-roam-node-file node))
-      (setq node-id (org-roam-node-id node))
-      (with-current-buffer (find-file-noselect node-file)
-        (org-with-point-at (org-roam-node-point node)
-          (setq heading-level (org-current-level)))))
-     
-     ;; Case 2: Need to create new node
-     ((and title url)
-      (let* ((sanitized-title (annotation--sanitize-filename title))
-	    (filename (concat sanitized-title ".org"))
-            (filepath (expand-file-name
-                       filename
-                       org-roam-directory)))
-        ;; Ensure directory exists
-        (unless (file-exists-p (file-name-directory filepath))
-          (make-directory (file-name-directory filepath) t))
-        
-        ;; Create file with org-roam properties
-        (with-current-buffer (find-file-noselect filepath)
-          (erase-buffer)
-          (org-mode)
-          (org-set-property "ID" (org-id-new))
-          (org-set-property "ROAM_REFS" url)
-	  (insert (format "#+title: " title))
-          (org-roam-tag-add "annotations")
-          (save-buffer)
-          (setq node-file filepath)
-          (setq node-id (org-id-get))
-          (setq heading-level 1))))
-     
-     ;; Case 3: Missing required attributes
-     (t
-      (annotation-debug 1 "Entry missing both url and title, skipping")
-      (setq node-file nil)))
-    
-    ;; Return target plist or nil
-    (when node-file
-      (list :node-file node-file
-            :node-id node-id
-            :node-kind heading-level))))
+(defun annotation--org-roam-node-open-or-create (node)
+  "Find and open or create an Org-roam NODE."
+  (if (org-roam-node-file node)
+      (org-roam-node-visit node nil t)
+    (org-roam-capture-
+     :node node
+     :templates '(("d" "default" plain "%?"
+		   :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org" "#+title: ${title}\n#+startup: content")
+		   :unnarrowed t
+		   :immediate-finish t)
+		  )
+     :props '(:finalize find-file)))
+  (current-buffer))
 
 (defun annotation--insert-heading-at-point (level title &optional body annotation-id updated-at)
   "A helper function to inserting a heading of a given level at point.
@@ -138,118 +80,172 @@ subtree or at the end of the outline path.
 Leaves the point at the end of the current subtree to facilitate either
 easy subheading insertion or insertion of the next heading of the same level."
   
-  (let ((stars (make-string (or level 1) ?*)))
+  (let ((stars (make-string (+ 1 (or level 0)) ?*)))
     ;; Insert heading
     (insert stars " " title "\n")
     
-    ;; Insert properties if provided
-    (when (or annotation-id updated-at)
-      (insert ":PROPERTIES:\n")
-      (when annotation-id
-        (insert (format ":ANNOTATION-ID: %s\n" annotation-id)))
-      (when updated-at
-        (insert (format ":UPDATED-AT: %s\n" updated-at)))
-      (insert ":END:\n"))
-    
-    ;; Insert body if provided
+    (when annotation-id
+      (org-set-property "Annotation-ID" annotation-id))
+    (when updated-at
+      (org-set-property "Updated-at" updated-at))
     (when body
       (insert body "\n"))
-    
-    ;; Add blank line for spacing
-    (insert "\n")))
+    ))
 
-(defun annotation--insert-annotation-at-point (level annotation)
-  "Format and insert the ANNOTATION at point.
-Use LEVEL in case we're at an id."
-  (let* ((annotation-id (plist-get annotation :id))
-	 (quote (plist-get annotation :quote))
-	 (text (plist-get annotation :text))
-	 (updated-at (plist-get annotation :updated-at))
-	 (annotation-level (+ 1 (or level 0))))
-    (annotation--insert-heading-at-point annotation-level "Annotation" quote annotation-id updated-at)
-    (when text
-      (annotation--insert-heading-at-point (+ 1 annotation-level) "Note" text))))
+(defun annotation--org-find-subheading (predicate)
+  "Find direct subheading satisfying PREDICATE under current heading/file.
+PREDICATE is called with point at each subheading.
+If found, moves point to the subheading and returns t.
+If not found, moves point to insertion location (end of current subtree)
+and returns nil."
+  (let* ((start-pos (point))
+         (target-level (1+ (or (org-current-level) 0)))
+         (limit (save-excursion 
+                  (org-end-of-subtree t t)
+                  (point)))
+         (found-pos nil))
+    ;; Search within our subtree only
+    (save-excursion
+      (while (and (not found-pos)
+                  (outline-next-heading)
+                  (< (point) limit))
+        (when (and (= (org-current-level) target-level)
+                   (funcall predicate))
+          (setq found-pos (point)))))
+    ;; Move to found position or insertion point
+    (if found-pos
+        (progn (goto-char found-pos) t)
+      (goto-char start-pos)
+      (org-end-of-subtree t t)
+      nil)))
 
-(defun annotation--find-annotation-with-id (annotation-id)
-  "Find first subheading with given ANNOTATION-ID.
-Leave the point in said subheading, or after all of the subheadings otherwise."
-  (let ((found nil)
-        (start-pos (point)))
-    ;; Move to first subheading
-    (when (org-goto-first-child)
-      (catch 'found
-        (while (not found)
-          ;; Check if current heading has matching annotation-id
-          (when (string= annotation-id
-                         (org-entry-get (point) "ANNOTATION-ID"))
-            (setq found t)
-            (throw 'found t))
-          
-          ;; Try to move to next sibling
-          (unless (org-goto-sibling)
-            ;; No more siblings, we're after all subheadings
-            (throw 'found nil)))))
+(defun annotation--is-heading-p (heading)
+  "A predicate to see if the heading at point is titled HEADING."
+  (lambda ()
+    (string= (org-get-heading t t t t) heading)))
+
+(defun annotation--goto-or-insert-heading (heading &optional body)
+  "Find a HEADING of one level lower than current of a given name.
+Go there. If it doesn't exist, create it first. Optionally insert a BODY.
+
+Return t if the heading was found as opposed to created anew."
+  (let ((level (or (org-current-level) 0))
+	(found (annotation--org-find-subheading (annotation--is-heading-p heading))))
+    (unless found
+      (if body
+	  (annotation--insert-heading-at-point level heading body)
+	(annotation--insert-heading-at-point level heading)))
     found))
 
-(defun annotation--process-annotation (target annotation)
-  "Process the current ANNOTATION at TARGET.
+(defun annotation--delete-heading (heading)
+  "Find a HEADING of one level lower than current of a given name.
+If it exists, delete it."
+  (save-excursion
+    (let ((level (or (org-current-level) 0)))
+      (when (annotation--org-find-subheading (annotation--is-heading-p heading))
+	(org-cut-subtree)))))
 
-For a given ANNOTATION, go to TARGET and either update its extant version
-or insert it as a new heading."
-  (let* ((heading-level (plist-get target :node-kind))
-         (node-id (plist-get target :node-id))
-         (node-file (plist-get target :node-file))
-         (annotation-id (plist-get annotation :id))
+(defun annotation--id-matches-p (annotation-id)
+  "Return predicate to check if a heading has matching ANNOTATION-ID property."
+  (lambda ()
+    (let ((heading-id (org-entry-get nil "annotation-id")))
+      (and heading-id
+           (string= heading-id annotation-id)))))
+
+(defun annotation--org-replace-heading-text (new-text)
+  "Replace text content under current heading, preserving subheadings.
+Replaces everything between heading line and first subheading (or end).
+NEW-TEXT is inserted as the new content."
+  (save-excursion
+    (org-end-of-meta-data t)
+    (let ((start (point)))
+      (outline-next-heading)
+      (delete-region start (point))
+    (insert new-text "\n"))
+  ))
+
+(defun annotation--process-annotation (annotation &optional heading-level)
+  "Process the current ANNOTATION.
+Assumes the point is in the correct narrowed buffer.
+
+For a given ANNOTATION, either update its extant version
+or insert it as a new heading.
+
+If HEADING-LEVEL is not provided, it is assumed to be 0, i.e. of a file node."
+  (let* ((heading-level (or heading-level 0))
+         (annotation-id (number-to-string (plist-get annotation :id)))
          (quote (plist-get annotation :quote))
          (text (plist-get annotation :text))
          (updated-at (plist-get annotation :updated-at)))
-    
-    (with-current-buffer (find-file-noselect node-file)
-      ;; Navigate to the target node
-      (org-id-goto node-id)
-      
-      ;; Move to end of entry to search/append
-      (org-end-of-subtree t t)
-      
-      ;; Try to find existing annotation
-      (org-back-to-heading t)
-      (let ((found (annotation--find-annotation-with-id annotation-id)))
-        (if found
-            ;; Update existing annotation by cutting and reinserting
-            (progn
-              (org-cut-subtree)
-              (annotation--insert-annotation-at-point heading-level annotation))
-          
-          ;; Insert new annotation at end
-          (org-end-of-subtree t t)
-          (annotation--insert-annotation-at-point heading-level annotation)))
-      
-      (save-buffer))))
+
+    (save-excursion
+      (let ((pred (annotation--id-matches-p annotation-id)))
+	(if (annotation--org-find-subheading pred)
+	    ;; Update existing annotation
+	    ;; In particular, keep potentially custom heading title while replacing text only.
+	    (let ((timestamp (org-entry-get nil "updated-at")))
+	      (when (or (not timestamp)
+			(time-less-p (parse-iso8601-time-string timestamp)
+				     (parse-iso8601-time-string updated-at))) 
+		(org-set-property "updated-at" updated-at)
+		(annotation--org-replace-heading-text quote)
+		(unless text
+		  (annotation--delete-heading "Note"))
+		(and text
+		     (annotation--goto-or-insert-heading "Note" text)
+		     (annotation--org-replace-heading-text text))))
+	  ;; Insert new annotation
+	  (annotation--insert-heading-at-point (+ 1 heading-level) "Annotation" quote annotation-id updated-at)
+	  (when text
+	    (annotation--insert-heading-at-point (+ 2 heading-level) "Note" text))))
+      )))
 
 ;; Quadratic for now, searches linearly through all annotations for each entry.
 ;; Will see how it performs for a book with many, likely ok.
 ;; TODO: Monitor quadratic search
-(defun annotation--update-entry (entry)
-  "Find node for our ENTRY, update existing annotations, insert new ones.
+(defun annotation--process-entry (entry)
+  "Find or create node for our ENTRY, update annotations, insert new ones.
 
 For every annotation, first get or create the file/relevant entry.
 Then save the point at the beginning of the relevant search area."
-  (let* ((target (annotation--get-target-for-entry entry))
-	 (annotations (plist-get entry :annotations)))
-    (dolist (annotation annotations)
-	    (annotation--process-annotation target annotation))
-    ))
+  (save-window-excursion
+    (let* ((heading-level nil)
+	   (url (plist-get entry :url))
+	   (title (plist-get entry :title))
+	   (node (or (when url (org-roam-node-from-ref url))
+		     (org-roam-node-from-title-or-alias title)
+		     (org-roam-node-create :title title :refs (list url) :id (org-id-new))))
+	   (buffer (annotation--org-roam-node-open-or-create node))
+	   (annotations (plist-get entry :annotations)))
 
-;; TODO: Optimization: precheck if any annotation changed since last update
-;; THen save a timestamp for the whole node as well as for each annotation,...
-;; Actually, this means we need to open the buffer to check for the annotations anyway.
-;; Probably not much overhead to just check each annotation then. Low priority.
-;; (defun annotation--get-last-update (entry))
+      (with-current-buffer buffer
+	(save-excursion
+	  ;; Record our heading level to differentiate files from headings
+	  (setq heading-level (org-current-level)) ; nil if file
+
+	  (when heading-level
+	    (org-narrow-to-subtree))
+
+	  ;; Ensure we have all the right data to proceed
+	  (when url
+	    (org-roam-ref-add url))
+	  (org-roam-tag-add '("annotations"))
+	  (annotation--goto-or-insert-heading "Annotations")
+
+	  ;; Process each annotation in turn
+	  (dolist (annotation annotations)
+	    (annotation--process-annotation annotation heading-level))
+
+	  (save-buffer)
+	  (widen)
+	  )))))
 
 (defun annotation--update-entries (entries)
   "Update each entry in the list of ENTRIES."
   (dolist (entry entries)
-	  (annotation--update-entry entry)))
+	  (annotation--process-entry entry)))
 
 (provide 'org-roam-annotation-import)
 ;;; org-roam-annotation-import.el ends here.
+
+
