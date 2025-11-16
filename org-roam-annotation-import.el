@@ -191,14 +191,13 @@ If HEADING-LEVEL is not provided, it is assumed to be 0, i.e. of a file node."
 		(annotation--org-replace-heading-text quote)
 		(unless text
 		  (annotation--delete-heading "Note"))
-		(and text
+		(and text (not (string-empty-p text))
 		     (annotation--goto-or-insert-heading "Note" text)
 		     (annotation--org-replace-heading-text text))))
 	  ;; Insert new annotation
 	  (annotation--insert-heading-at-point (+ 1 heading-level) "Annotation" quote annotation-id updated-at)
-	  (when text
-	    (annotation--insert-heading-at-point (+ 2 heading-level) "Note" text))))
-      )))
+	  (when (and text (not (string-empty-p text)))
+	    (annotation--insert-heading-at-point (+ 2 heading-level) "Note" text)))))))
 
 ;; Quadratic for now, searches linearly through all annotations for each entry.
 ;; Will see how it performs for a book with many, likely ok.

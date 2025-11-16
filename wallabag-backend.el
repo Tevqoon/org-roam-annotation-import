@@ -30,3 +30,33 @@
 (require 'wallabag)
 
 (provide 'wallabag-backend)
+
+(defun annotation--wallabag-gather-annotations ()
+  (let* ((wallabag-entries (wallabag-db-select))
+	 (entries
+	  (cl-loop for entry in wallabag-entries
+		   for annotations = (alist-get 'annotations entry)
+		   when (and annotations 
+			     (vectorp annotations) 
+			     (> (length annotations) 0))
+		   collect (list
+			    :version 1
+			    :id (alist-get 'id entry)
+			    :title (alist-get 'title entry)
+			    :url (alist-get 'url entry)
+			    :updated-at (alist-get 'updated_at entry)
+			    :annotations 
+			    (cl-loop for annot across annotations
+				     collect (list
+					      :id (alist-get 'id annot)
+					      :source "Wallabag"
+					      :quote (alist-get 'quote annot)
+					      :text (alist-get 'text annot)
+					      :created-at (alist-get 'created_at annot)
+					      :updated-at (alist-get 'updated_at annot)))))))
+    entries))
+
+(defun wallabag-synchronise-annotations ()
+  (interactive)
+  (let* ((entries (annotation--wallabag-gather-annotations)))
+    (annotation--update-entries entries)))
