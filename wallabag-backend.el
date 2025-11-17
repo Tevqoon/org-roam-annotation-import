@@ -26,18 +26,20 @@
 ;; This fork separates the insertion logic from the importing, allowing for multiple backends.
 ;; Further, we use org-roam for the annotations, specifying the file by using roam-refs.
 
+;;; Code:
 (require 'org-roam-annotation-import)
 (require 'wallabag)
 
-(provide 'wallabag-backend)
-
+;;; TODO: Remove wallabag dependency and gather annotations directly from the web api.
+;;; Should allow for more stable updates as well. Currently requires the complete rebuild in wallabag
 (defun annotation--wallabag-gather-annotations ()
+  "Get annotations from wallabag and slice them for processing."
   (let* ((wallabag-entries (wallabag-db-select))
 	 (entries
 	  (cl-loop for entry in wallabag-entries
 		   for annotations = (alist-get 'annotations entry)
-		   when (and annotations 
-			     (vectorp annotations) 
+		   when (and annotations
+			     (vectorp annotations)
 			     (> (length annotations) 0))
 		   collect (list
 			    :version 1
@@ -45,7 +47,7 @@
 			    :title (alist-get 'title entry)
 			    :url (alist-get 'url entry)
 			    :updated-at (alist-get 'updated_at entry)
-			    :annotations 
+			    :annotations
 			    (cl-loop for annot across annotations
 				     collect (list
 					      :id (alist-get 'id annot)
@@ -57,11 +59,16 @@
     entries))
 
 (defun wallabag-synchronise-annotations ()
+  "Pull the annotations from the Wallabag database and send them to annotations."
   (interactive)
   (let* ((entries (annotation--wallabag-gather-annotations)))
     (annotation--update-entries entries)))
 
 (defun wallabag-synchronise-annotation ()
+  "Synchronise the first entry with annotations. Used/ful for debugging."
   (interactive)
   (let* ((entries (list (car (annotation--wallabag-gather-annotations)))))
     (annotation--update-entries entries)))
+
+(provide 'wallabag-backend)
+;;; wallabag-backend.el ends here
