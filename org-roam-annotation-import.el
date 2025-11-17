@@ -45,8 +45,6 @@
   :group 'annotation
   :type 'integer)
 
-(setq annotation-debug-level 2)
-
 (defun annotation-debug (level msg &rest args)
   "Print debug message MSG at debug LEVEL with ARGS."
   (when (>= annotation-debug-level level)
@@ -189,7 +187,8 @@ If HEADING-LEVEL is not provided, it is assumed to be 0, i.e. of a file node."
 				     (parse-iso8601-time-string updated-at))) 
 		(org-set-property "updated-at" updated-at)
 		(annotation--org-replace-heading-text quote)
-		(unless text
+		(when (or (null text)
+			  (string-empty-p text))
 		  (annotation--delete-heading "Note"))
 		(and text (not (string-empty-p text))
 		     (annotation--goto-or-insert-heading "Note" text)
