@@ -60,3 +60,8 @@
   (interactive)
   (let* ((entries (annotation--wallabag-gather-annotations)))
     (annotation--update-entries entries)))
+
+(defun wallabag-synchronise-annotation ()
+  (interactive)
+  (let* ((entries (list (car (annotation--wallabag-gather-annotations)))))
+    (annotation--update-entries entries)))
