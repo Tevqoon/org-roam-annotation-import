@@ -80,14 +80,14 @@ easy subheading insertion or insertion of the next heading of the same level."
   
   (let ((stars (make-string (+ 1 (or level 0)) ?*)))
     ;; Insert heading
-    (insert stars " " title "\n")
-    
-    (when annotation-id
-      (org-set-property "Annotation-ID" annotation-id))
-    (when updated-at
-      (org-set-property "Updated-at" updated-at))
-    (when body
-      (insert body "\n"))
+    (save-excursion
+      (insert stars " " title "\n")
+      (when annotation-id
+	(org-set-property "Annotation-ID" annotation-id))
+      (when updated-at
+	(org-set-property "Updated-at" updated-at))
+      (when body
+	(insert body "\n")))
     ))
 
 (defun annotation--org-find-subheading (predicate)
