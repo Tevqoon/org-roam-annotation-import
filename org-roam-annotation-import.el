@@ -80,16 +80,14 @@ colon is safe), hyphens, periods, and alphanumerics."
       s)))
 
 (defun annotation--current-outline-tags (entry-title)
-  "Collect tag context for the annotation heading at point.
-Takes the outline path to the current heading, drops everything up to
-and including the enclosing `Annotations' container, then prepends
-ENTRY-TITLE. Returns a space-separated string of slugified tags."
+  "Collect tag context for the annotation heading at point."
   (let* ((path (org-get-outline-path))
          (tail (member "Annotations" path))
          (after-annotations (if tail (cdr tail) path))
          (all (append (and entry-title (list entry-title)) after-annotations))
          (slugs (delq nil (mapcar #'annotation--slugify all)))
-         (slugs (delete "" slugs)))
+         (slugs (delete "" slugs))
+         (slugs (delete-dups slugs)))
     (string-join slugs " ")))
 
 ;;;; Entry-plist value coercion
@@ -226,6 +224,7 @@ TAGS is a space-separated tag string."
   (org-set-property "ANKI_NOTE_TYPE" annotation-anki-note-type)
   (org-set-property "ANKI_DECK" annotation-anki-deck)
   (when (and tags (not (string-empty-p tags)))
+    (org-delete-property "ANKI_TAGS")
     (org-set-property "ANKI_TAGS" tags)))
 
 ;;;; Annotation processing
@@ -305,6 +304,10 @@ Find existing by id and update, or insert new."
             (when heading-level (org-narrow-to-subtree))
             (when url (org-roam-ref-add url))
             (org-roam-tag-add '("annotations"))
+	    (when-let ((author (plist-get entry :author))
+		       (slug   (annotation--slugify author)))
+	      (org-roam-tag-add (list slug)))
+
             ;; Position at the start of the node's scope before
             ;; finding/inserting the Annotations container.
             (if heading-level
