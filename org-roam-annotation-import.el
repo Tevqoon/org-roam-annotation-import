@@ -45,10 +45,47 @@
   :group 'annotation
   :type 'integer)
 
+(defcustom annotation-default-json-directory nil
+  "Default directory to scan for JSON annotation files.
+If nil, user will be prompted for directory when using batch import."
+  :group 'annotation
+  :type '(choice (const :tag "None" nil)
+                 (directory :tag "Directory")))
+
+(defcustom annotation-use-chapter-grouping t
+  "Whether to group annotations under chapter subheadings.
+When non-nil, annotations are organized under their chapter headings.
+When nil, all annotations appear flat under the Annotations heading."
+  :group 'annotation
+  :type 'boolean)
+
 (defun annotation-debug (level msg &rest args)
   "Print debug message MSG at debug LEVEL with ARGS."
   (when (>= annotation-debug-level level)
     (apply 'message (concat "[Annotations] " msg) args)))
+
+
+(defun annotation--normalize-timestamp (timestamp)
+  "Convert TIMESTAMP to ISO 8601 format string.
+TIMESTAMP can be:
+- An integer (Unix epoch seconds)
+- A string (assumed to already be ISO 8601)
+- nil (returns nil)"
+  (cond
+   ((null timestamp) nil)
+   ((integerp timestamp)
+    (format-time-string "%Y-%m-%dT%H:%M:%S%z" (seconds-to-time timestamp)))
+   ((stringp timestamp) timestamp)
+   (t nil)))
+
+(defun annotation--generate-id (source &rest components)
+  "Generate a stable annotation ID from SOURCE and COMPONENTS.
+Uses SHA-1 hash of concatenated components for uniqueness."
+  (let ((combined (mapconcat
+                   (lambda (c) (format "%s" (or c "")))
+                   (cons source components)
+                   "|")))
+    (secure-hash 'sha1 combined)))
 
 (defun annotation--org-roam-node-open-or-create (node)
   "Find and open or create an Org-roam NODE."
@@ -64,31 +101,29 @@
      :props '(:finalize find-file)))
   (current-buffer))
 
-(defun annotation--insert-heading-at-point (level title &optional body annotation-id updated-at)
-  "A helper function to inserting a heading of a given level at point.
-LEVEL is the level to insert to. If nil, insert a top level heading.
+(defun annotation--insert-heading-at-point (level title &optional body annotation-id updated-at properties)
+  "Insert a heading of a given LEVEL at point.
+LEVEL is the heading depth. If nil, insert a top level heading.
 TITLE is the title of the heading.
-BODY is the underneath the heading.
-ANNOTATION-ID is the annotation id used for annotation bookkeeping.
+BODY is the text underneath the heading.
+ANNOTATION-ID is the annotation id used for bookkeeping.
 UPDATED-AT is a timestamp of when the annotation was last updated.
+PROPERTIES is an alist of additional properties to set.
 
-It is assumed the point is at the proper spot, eiher after cutting a previous
-subtree or at the end of the outline path.
-
-Leaves the point at the end of the current subtree to facilitate either
-easy subheading insertion or insertion of the next heading of the same level."
-  
+Leaves the point at the end of the current subtree."
   (let ((stars (make-string (+ 1 (or level 0)) ?*)))
-    ;; Insert heading
     (save-excursion
       (insert stars " " title "\n")
       (when annotation-id
-	(org-set-property "Annotation-ID" annotation-id))
+        (org-set-property "Annotation-ID" annotation-id))
       (when updated-at
-	(org-set-property "Updated-at" updated-at))
+        (org-set-property "Updated-at" (annotation--normalize-timestamp updated-at)))
+      ;; Insert additional properties
+      (dolist (prop properties)
+        (when (cdr prop)
+          (org-set-property (car prop) (format "%s" (cdr prop)))))
       (when body
-	(insert body "\n")))
-    ))
+        (insert body "\n")))))
 
 (defun annotation--org-find-subheading (predicate)
   "Find direct subheading satisfying PREDICATE under current heading/file.
@@ -146,7 +181,7 @@ If it exists, delete it."
 (defun annotation--id-matches-p (annotation-id)
   "Return predicate to check if a heading has matching ANNOTATION-ID property."
   (lambda ()
-    (let ((heading-id (org-entry-get nil "annotation-id")))
+    (let ((heading-id (org-entry-get nil "Annotation-ID")))
       (and heading-id
            (string= heading-id annotation-id)))))
 
@@ -159,8 +194,8 @@ NEW-TEXT is inserted as the new content."
     (let ((start (point)))
       (outline-next-heading)
       (delete-region start (point))
-    (insert new-text "\n"))
-  ))
+      (insert new-text "\n"))
+    ))
 
 (defun annotation--process-annotation (annotation &optional heading-level)
   "Process the current ANNOTATION.
@@ -169,79 +204,118 @@ Assumes the point is in the correct narrowed buffer.
 For a given ANNOTATION, either update its extant version
 or insert it as a new heading.
 
+ANNOTATION plist supports:
+  :id         - Unique identifier (required)
+  :quote      - The highlighted text
+  :text       - User's note/comment
+  :updated-at - Timestamp (Unix or ISO 8601)
+  :source     - Source system (e.g., \"Wallabag\", \"Kobo\")
+  :chapter    - Chapter name for grouping
+  :page       - Page number
+  :location   - Location identifier
+
 If HEADING-LEVEL is not provided, it is assumed to be 0, i.e. of a file node."
   (let* ((heading-level (or heading-level 0))
-         (annotation-id (number-to-string (plist-get annotation :id)))
+         (annotation-id (let ((id (plist-get annotation :id)))
+                          (if (stringp id) id (number-to-string id))))
          (quote (plist-get annotation :quote))
          (text (plist-get annotation :text))
-         (updated-at (plist-get annotation :updated-at)))
+         (updated-at (plist-get annotation :updated-at))
+         (source (plist-get annotation :source))
+         (chapter (plist-get annotation :chapter))
+         (page (plist-get annotation :page))
+         (location (plist-get annotation :location))
+         ;; Additional properties to store
+         (extra-props `(("Source" . ,source)
+                        ("Page" . ,page)
+                        ("Location" . ,location)
+                        ("Chapter" . ,chapter))))
 
     (save-excursion
+      ;; Navigate to chapter subheading if enabled and chapter exists
+      (when (and annotation-use-chapter-grouping chapter)
+        (annotation--goto-or-insert-heading chapter)
+        (setq heading-level (1+ heading-level)))
+
       (let ((pred (annotation--id-matches-p annotation-id)))
-	(if (annotation--org-find-subheading pred)
-	    ;; Update existing annotation
-	    ;; In particular, keep potentially custom heading title while replacing text only.
-	    (let ((timestamp (org-entry-get nil "updated-at")))
-	      (when (or (not timestamp)
-			(time-less-p (parse-iso8601-time-string timestamp)
-				     (parse-iso8601-time-string updated-at))) 
-		(org-set-property "updated-at" updated-at)
-		(annotation--org-replace-heading-text quote)
-		(when (or (null text)
-			  (string-empty-p text))
-		  (annotation--delete-heading "Note"))
-		(and text (not (string-empty-p text))
-		     (annotation--goto-or-insert-heading "Note" text)
-		     (annotation--org-replace-heading-text text))))
-	  ;; Insert new annotation
-	  (annotation--insert-heading-at-point (+ 1 heading-level) "Annotation" quote annotation-id updated-at)
-	  (when (and text (not (string-empty-p text)))
-	    (annotation--insert-heading-at-point (+ 2 heading-level) "Note" text)))))))
+        (if (annotation--org-find-subheading pred)
+            ;; Update existing annotation
+            (let ((timestamp (org-entry-get nil "updated-at")))
+              (when (or (not timestamp)
+                        (time-less-p (parse-iso8601-time-string timestamp)
+                                     (parse-iso8601-time-string
+                                      (annotation--normalize-timestamp updated-at))))
+                (org-set-property "updated-at" (annotation--normalize-timestamp updated-at))
+                ;; Update extra properties
+                (dolist (prop extra-props)
+                  (when (cdr prop)
+                    (org-set-property (car prop) (format "%s" (cdr prop)))))
+                (annotation--org-replace-heading-text quote)
+                (when (or (null text) (string-empty-p text))
+                  (annotation--delete-heading "Note"))
+                (and text (not (string-empty-p text))
+                     (annotation--goto-or-insert-heading "Note" text)
+                     (annotation--org-replace-heading-text text))))
+          ;; Insert new annotation
+          (annotation--insert-heading-at-point
+           (+ 1 heading-level) "Annotation" quote annotation-id updated-at extra-props)
+          (when (and text (not (string-empty-p text)))
+            (annotation--insert-heading-at-point (+ 2 heading-level) "Note" text)))))))
 
 ;; Quadratic for now, searches linearly through all annotations for each entry.
 ;; Will see how it performs for a book with many, likely ok.
 ;; TODO: Monitor quadratic search
 (defun annotation--process-entry (entry)
-  "Find or create node for our ENTRY, update annotations, insert new ones.
+  "Find or create node for ENTRY, update annotations, insert new ones.
 
-For every annotation, first get or create the file/relevant entry.
-Then save the point at the beginning of the relevant search area."
+ENTRY plist supports:
+  :title       - Document title (required)
+  :url         - URL reference for org-roam
+  :author      - Author name
+  :annotations - List of annotation plists
+  :updated-at  - Last update timestamp"
   (save-window-excursion
     (let* ((heading-level nil)
-	   (url (plist-get entry :url))
-	   (title (plist-get entry :title))
-	   (node (or (when url (org-roam-node-from-ref url))
-		     (org-roam-node-from-title-or-alias title)
-		     (org-roam-node-create :title title :refs (list url) :id (org-id-new))))
-	   (buffer (annotation--org-roam-node-open-or-create node))
-	   (annotations (plist-get entry :annotations)))
+           (url (plist-get entry :url))
+           (title (plist-get entry :title))
+           (author (plist-get entry :author))
+           (node (or (when url (org-roam-node-from-ref url))
+                     (org-roam-node-from-title-or-alias title)
+                     (org-roam-node-create :title title :refs (when url (list url)) :id (org-id-new))))
+           (buffer (annotation--org-roam-node-open-or-create node))
+           (annotations (plist-get entry :annotations)))
 
       (with-current-buffer buffer
-	(save-excursion
-	  ;; Record our heading level to differentiate files from headings
-	  (setq heading-level (org-current-level)) ; nil if file
+        (save-excursion
+          (setq heading-level (org-current-level))
 
-	  (when heading-level
-	    (org-narrow-to-subtree))
+          (when heading-level
+            (org-narrow-to-subtree))
 
-	  ;; Ensure we have all the right data to proceed
-	  (when url
-	    (org-roam-ref-add url))
-	  (org-roam-tag-add '("annotations"))
-	  (annotation--goto-or-insert-heading "Annotations")
+          (when url
+            (org-roam-ref-add url))
+          (org-roam-tag-add '("annotations"))
+          
+          ;; Add author as property if available
+          (when author
+            (save-excursion
+              (goto-char (point-min))
+              (when heading-level
+                (org-back-to-heading t))
+              (org-set-property "Author" author)))
 
-	  ;; Process each annotation in turn
-	  (dolist (annotation annotations)
-	    (annotation--process-annotation annotation heading-level))
+          (annotation--goto-or-insert-heading "Annotations")
 
-	  (save-buffer)
-	  (widen)
-	  )))))
+          (dolist (annotation annotations)
+            (annotation--process-annotation annotation heading-level))
+
+          (save-buffer)
+          (widen))))))
 
 (defun annotation--update-entries (entries)
   "Update each entry in the list of ENTRIES."
   (dolist (entry entries)
-	  (annotation--process-entry entry)))
+    (annotation--process-entry entry)))
 
 (provide 'org-roam-annotation-import)
 ;;; org-roam-annotation-import.el ends here.
