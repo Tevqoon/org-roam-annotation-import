@@ -336,12 +336,23 @@ Find existing by id and update, or insert new."
                     (annotation--enter-chapter-container annotation)
                     (annotation--process-annotation annotation title url)))
                 (save-buffer)
-                (widen)))))))))
+                (widen)
+		(buffer-file-name)))))))))
+
+(defvar annotation--recently-modified-files nil
+  "List of files modified by the most recent `annotation--update-entries' call.")
 
 (defun annotation--update-entries (entries)
-  "Update each entry in ENTRIES."
+  "Update each entry in ENTRIES.
+Stores the set of modified file paths in `annotation--recently-modified-files'."
+  (setq annotation--recently-modified-files nil)
   (dolist (entry entries)
-    (annotation--process-entry entry)))
+    (when-let ((file (annotation--process-entry entry)))
+      (push file annotation--recently-modified-files)))
+  (setq annotation--recently-modified-files
+        (delete-dups (nreverse annotation--recently-modified-files)))
+  (message "Annotation sync done: %d file(s) modified"
+           (length annotation--recently-modified-files)))
 
 ;;;; Bulk re-import support
 
