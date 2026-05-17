@@ -262,10 +262,15 @@ Find existing by id and update, or insert new."
     (save-excursion
       (if (annotation--org-find-subheading
            (annotation--id-matches-p annotation-id))
-          ;; Existing annotation: point now on it. Rewrite its content.
-          (annotation--write-annotation-content annotation entry-title entry-url)
-        ;; New annotation: insert a heading, then move point to its
-        ;; start so writes target it.
+          ;; Existing annotation: check if it actually changed.
+          (let* ((stored-updated-at (org-entry-get nil "Updated-at"))
+                 (incoming-updated-at (plist-get annotation :updated-at)))
+            (if (and stored-updated-at
+                     incoming-updated-at
+                     (string= stored-updated-at incoming-updated-at))
+                (annotation-debug 1 "Skipping unchanged annotation %s" annotation-id)
+              (annotation--write-annotation-content annotation entry-title entry-url)))
+        ;; New annotation: insert heading, then write content.
         (let (new-heading-pos)
           (save-excursion
             (org-end-of-subtree t t)
@@ -286,12 +291,23 @@ Find existing by id and update, or insert new."
 
 ;;;; Entry processing
 
+(defun annotation--max-stored-updated-at ()
+  "Return the latest Updated-at property value in the current buffer, or nil."
+  (let ((times nil))
+    (org-map-entries
+     (lambda ()
+       (when-let ((ts (org-entry-get nil "Updated-at")))
+         (push ts times)))
+     nil 'file)
+    (car (sort times #'string>))))
+
 (defun annotation--process-entry (entry)
   "Find or create a node for ENTRY, then upsert each of its annotations."
   (save-window-excursion
     (let* ((url         (plist-get entry :url))
            (title       (plist-get entry :title))
            (annotations (plist-get entry :annotations))
+           (incoming-updated-at (annotation--entry-updated-at entry))
            (node (or (when url (org-roam-node-from-ref url))
                      (org-roam-node-from-title-or-alias title)
                      (org-roam-node-create :title title
@@ -299,27 +315,28 @@ Find existing by id and update, or insert new."
                                            :id   (org-id-new))))
            (buffer (annotation--org-roam-node-open-or-create node)))
       (with-current-buffer buffer
-        (save-excursion
-          (let ((heading-level (org-current-level)))
-            (when heading-level (org-narrow-to-subtree))
-            (when url (org-roam-ref-add url))
-            (org-roam-tag-add '("annotations"))
-	    (when-let ((author (plist-get entry :author))
-		       (slug   (annotation--slugify author)))
-	      (org-roam-tag-add (list slug)))
-
-            ;; Position at the start of the node's scope before
-            ;; finding/inserting the Annotations container.
-            (if heading-level
-                (org-back-to-heading t)
-              (goto-char (point-min)))
-            (annotation--goto-or-insert-child "Annotations")
-            (dolist (annotation annotations)
-              (save-excursion
-                (annotation--enter-chapter-container annotation)
-                (annotation--process-annotation annotation title url)))
-            (save-buffer)
-            (widen)))))))
+        (let ((stored-updated-at (annotation--max-stored-updated-at)))
+          (unless (and stored-updated-at
+                       incoming-updated-at
+                       (string= stored-updated-at incoming-updated-at))
+            (save-excursion
+              (let ((heading-level (org-current-level)))
+                (when heading-level (org-narrow-to-subtree))
+                (when url (org-roam-ref-add url))
+                (org-roam-tag-add '("annotations"))
+                (when-let ((author (plist-get entry :author))
+                           (slug   (annotation--slugify author)))
+                  (org-roam-tag-add (list slug)))
+                (if heading-level
+                    (org-back-to-heading t)
+                  (goto-char (point-min)))
+                (annotation--goto-or-insert-child "Annotations")
+                (dolist (annotation annotations)
+                  (save-excursion
+                    (annotation--enter-chapter-container annotation)
+                    (annotation--process-annotation annotation title url)))
+                (save-buffer)
+                (widen)))))))))
 
 (defun annotation--update-entries (entries)
   "Update each entry in ENTRIES."
