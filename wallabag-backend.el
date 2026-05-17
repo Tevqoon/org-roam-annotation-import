@@ -1,7 +1,7 @@
 ;;; wallabag-backend.el --- Sync Wallabag highlights with Org-roam -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
-;; Version: 0.2
+;; Version: 0.3
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -23,9 +23,9 @@
 ;;   wallabag-host, wallabag-username, wallabag-password,
 ;;   wallabag-clientid, wallabag-secret
 ;;
-;; Token state is held in process memory; on expiry the access token is
-;; refreshed automatically.  All network I/O is synchronous (request.el
-;; :sync t) to keep the calling logic simple.
+;; Token acquisition and capability detection are synchronous (fast, one-shot).
+;; Entry fetching is async: pages are fetched recursively via request.el
+;; callbacks, so Emacs is not blocked during the sync.
 
 ;;; Code:
 
@@ -34,7 +34,7 @@
 (require 'json)
 
 ;;;; ----------------------------------------------------------------
-;;;; Token management
+;;;; Token management (synchronous -- fast, prerequisite for everything)
 ;;;; ----------------------------------------------------------------
 
 (defvar wb--access-token nil
@@ -71,31 +71,28 @@
     access))
 
 (defun wb--request-token-with-password ()
-  "Fetch a fresh access + refresh token using the password grant.
-Uses the variables `wallabag-host', `wallabag-username', `wallabag-password',
-`wallabag-clientid', and `wallabag-secret'."
+  "Fetch a fresh access + refresh token using the password grant."
   (let ((response
          (request (concat wallabag-host "/oauth/v2/token")
-           :type    "POST"
-           :data    (list (cons "grant_type"    "password")
-                          (cons "client_id"     wallabag-clientid)
-                          (cons "client_secret" wallabag-secret)
-                          (cons "username"      wallabag-username)
-                          (cons "password"      wallabag-password))
-           :parser  #'json-read
-           :sync    t
-           :error   (cl-function
-                     (lambda (&key error-thrown response &allow-other-keys)
-                       (error "Wallabag password grant failed (%s): %S"
-                              (request-response-status-code response)
-                              error-thrown))))))
+           :type   "POST"
+           :data   (list (cons "grant_type"    "password")
+                         (cons "client_id"     wallabag-clientid)
+                         (cons "client_secret" wallabag-secret)
+                         (cons "username"      wallabag-username)
+                         (cons "password"      wallabag-password))
+           :parser #'json-read
+           :sync   t
+           :error  (cl-function
+                    (lambda (&key error-thrown response &allow-other-keys)
+                      (error "Wallabag password grant failed (%s): %S"
+                             (request-response-status-code response)
+                             error-thrown))))))
     (wb--parse-token-response (request-response-data response))))
 
 (defun wb--request-token-with-refresh ()
-  "Attempt to refresh the access token using `wb--refresh-token'.
-Returns the new access token, or signals an error."
+  "Refresh the access token using `wb--refresh-token'."
   (unless wb--refresh-token
-    (error "Wallabag: no refresh token available; use password grant"))
+    (error "Wallabag: no refresh token available"))
   (let ((response
          (request (concat wallabag-host "/oauth/v2/token")
            :type   "POST"
@@ -128,81 +125,59 @@ Returns the new access token, or signals an error."
   (cons "Authorization" (concat "Bearer " (wb--ensure-token))))
 
 ;;;; ----------------------------------------------------------------
-;;;; Version / capability detection
+;;;; Version / capability detection (synchronous, once per session)
 ;;;; ----------------------------------------------------------------
 
 (defvar wb--annotations-filter-supported nil
   "Non-nil if the running wallabag instance supports ?annotations=1.")
 
+(defvar wb--capabilities-detected nil
+  "Non-nil once `wb--detect-capabilities' has run successfully.")
+
 (defun wb--detect-capabilities ()
-  "Query /api/version.json and set capability flags."
-  (let ((response
-         (request (concat wallabag-host "/api/version.json")
-           :headers (list (wb--auth-header))
-           :parser  #'json-read
-           :sync    t
-           :error   (cl-function
-                     (lambda (&key error-thrown &allow-other-keys)
-                       (error "Wallabag: version check failed: %S" error-thrown))))))
-    (let* ((raw     (request-response-data response))
-           ;; raw is a quoted string like "2.6.10"; strip quotes via json-read
-           (version (if (stringp raw) raw (format "%s" raw)))
-           (parts   (mapcar #'string-to-number
-                            (split-string (string-trim version "\"") "\\.")))
-           (major   (nth 0 parts))
-           (minor   (nth 1 parts)))
-      (setq wb--annotations-filter-supported
-            (or (> major 2)
-                (and (= major 2) (>= minor 6))))
-      (message "Wallabag: version %s — annotations filter %s"
-               version
-               (if wb--annotations-filter-supported "supported" "NOT supported")))))
-
-;;;; ----------------------------------------------------------------
-;;;; Entry / annotation fetching
-;;;; ----------------------------------------------------------------
-
-(defconst wb--per-page 100
-  "Page size for entry list requests.")
-
-(defun wb--fetch-entries-page (page)
-  "Fetch one PAGE of annotated entries.  Returns the parsed JSON alist."
-  (let ((params (append
-                 (list (cons "detail"  "metadata")
-                       (cons "perPage" (number-to-string wb--per-page))
-                       (cons "page"    (number-to-string page)))
-                 (when wb--annotations-filter-supported
-                   (list (cons "annotations" "1"))))))
+  "Query /api/version.json and set capability flags.  Runs only once per session."
+  (unless wb--capabilities-detected
     (let ((response
-           (request (concat wallabag-host "/api/entries.json")
+           (request (concat wallabag-host "/api/version.json")
              :headers (list (wb--auth-header))
-             :params  params
              :parser  #'json-read
              :sync    t
              :error   (cl-function
-                       (lambda (&key error-thrown response &allow-other-keys)
-                         (let ((code (request-response-status-code response)))
-                           ;; 404 means page > pages; treat as end of data
-                           (if (eql code 404)
-                               nil
-                             (error "Wallabag: entries fetch failed (%s): %S"
-                                    code error-thrown))))))))
-      (request-response-data response))))
+                       (lambda (&key error-thrown &allow-other-keys)
+                         (error "Wallabag: version check failed: %S" error-thrown))))))
+      (let* ((raw     (request-response-data response))
+             (version (if (stringp raw) raw (format "%s" raw)))
+             (parts   (mapcar #'string-to-number
+                              (split-string (string-trim version "\"") "\\.")))
+             (major   (nth 0 parts))
+             (minor   (nth 1 parts)))
+        (setq wb--annotations-filter-supported
+              (or (> major 2) (and (= major 2) (>= minor 6)))
+              wb--capabilities-detected t)
+        (message "Wallabag: version %s -- annotations filter %s"
+                 version
+                 (if wb--annotations-filter-supported "supported" "NOT supported"))))))
+
+;;;; ----------------------------------------------------------------
+;;;; Data normalisation helpers
+;;;; ----------------------------------------------------------------
 
 (defun wb--fix-timestamp (ts)
-  "Normalise wallabag timestamp TS to an ISO 8601 string with colon in TZ.
-Wallabag emits e.g. \"2024-06-12T08:42:11+0000\" (no colon); some parsers
-need \"2024-06-12T08:42:11+00:00\".  We insert the colon and return the string."
+  "Normalise wallabag timestamp TS to ISO 8601 with a colon in the TZ offset.
+Wallabag emits e.g. \"2024-06-12T08:42:11+0100\" (no colon).  If a colon is
+already present -- \"...+01:00\" -- the string is returned unchanged."
   (when (stringp ts)
-    (replace-regexp-in-string
-     "\\([+-][0-9]\\{2\\}\\)\\([0-9]\\{2\\}\\)\\'" "\\1:\\2" ts)))
+    (if (string-match-p "[+-][0-9]\\{2\\}:[0-9]\\{2\\}\\'" ts)
+        ts
+      (replace-regexp-in-string
+       "\\([+-][0-9]\\{2\\}\\)\\([0-9]\\{2\\}\\)\\'" "\\1:\\2" ts))))
 
 (defun wb--coerce-int (x)
-  "Return X as an integer, handling the case where it is a string."
+  "Return X as an integer, handling the case where it arrives as a string."
   (if (stringp x) (string-to-number x) x))
 
 (defun wb--normalise-annotation (annot)
-  "Convert raw annotation alist ANNOT into a plist for annotation--update-entries."
+  "Convert raw annotation alist ANNOT into a plist for `annotation--update-entries'."
   (list :id         (wb--coerce-int (alist-get 'id annot))
         :source     "Wallabag"
         :quote      (or (alist-get 'quote annot) "")
@@ -211,9 +186,8 @@ need \"2024-06-12T08:42:11+00:00\".  We insert the colon and return the string."
         :updated-at (wb--fix-timestamp (alist-get 'updated_at annot))))
 
 (defun wb--normalise-entry (entry)
-  "Convert raw entry alist ENTRY into a plist for annotation--update-entries.
-Returns nil when the entry has no annotations (used for client-side filtering
-on wallabag < 2.6)."
+  "Convert raw entry alist ENTRY into a plist for `annotation--update-entries'.
+Returns nil when the entry has no annotations (client-side filter for < 2.6)."
   (let* ((raw-annots (alist-get 'annotations entry))
          (annots     (cond
                       ((vectorp raw-annots) (append raw-annots nil))
@@ -222,76 +196,100 @@ on wallabag < 2.6)."
     (when (and annots (> (length annots) 0))
       (let* ((pub    (alist-get 'published_by entry))
              (dom    (alist-get 'domain_name  entry))
-             ;; published_by is a vector of strings or a string depending on version
              (author (cond
                       ((vectorp pub)
                        (and (> (length pub) 0) (aref pub 0)))
                       ((and (stringp pub) (not (string-empty-p pub))) pub)
                       ((and (stringp dom) (not (string-empty-p dom))) dom)
                       (t nil))))
-        (list :version    1
-              :id         (alist-get 'id         entry)
-              :title      (alist-get 'title      entry)
-              :url        (alist-get 'url        entry)
-              :author     author
-              :updated-at (wb--fix-timestamp (alist-get 'updated_at entry))
+        (list :version     1
+              :id          (alist-get 'id         entry)
+              :title       (alist-get 'title      entry)
+              :url         (alist-get 'url        entry)
+              :author      author
+              :updated-at  (wb--fix-timestamp (alist-get 'updated_at entry))
               :annotations (mapcar #'wb--normalise-annotation annots))))))
 
-(defun wb--fetch-all-annotated-entries ()
-  "Page through the Wallabag API and return all entries that have annotations.
-Performs capability detection on first call."
-  (wb--detect-capabilities)
-  (let ((page  1)
-        (pages nil)
-        (result '()))
-    (while (or (null pages) (<= page pages))
-      (let ((data (wb--fetch-entries-page page)))
-        (unless data
-          ;; 404 or empty — stop gracefully
-          (setq pages 0))
-        (when data
-          (setq pages (wb--coerce-int (alist-get 'pages data)))
-          (let ((items (append
-                        (alist-get 'items
-                                   (alist-get '_embedded data))
-                        nil)))
-            (dolist (entry items)
-              (let ((norm (wb--normalise-entry entry)))
-                (when norm
-                  (push norm result)))))
-          (setq page (1+ page)))))
-    (nreverse result)))
-
 ;;;; ----------------------------------------------------------------
-;;;; Public interface — matches original wallabag-backend.el API
+;;;; Async entry fetching -- recursive pagination via request.el callbacks
 ;;;; ----------------------------------------------------------------
 
-(defun annotation--wallabag-gather-annotations ()
-  "Fetch annotations directly from the Wallabag REST API.
-Returns a list of entry plists in the format expected by
-`annotation--update-entries'."
-  (wb--fetch-all-annotated-entries))
+(defconst wb--per-page 100
+  "Page size for entry list requests.")
+
+(defun wb--fetch-entries-page-async (page accumulator callback)
+  "Fetch PAGE of annotated entries; on completion recurse or call CALLBACK.
+ACCUMULATOR is the reversed list of normalised plists gathered so far.
+When all pages are done, CALLBACK is called with the final forward-order list."
+  (let ((params (append
+                 (list (cons "detail"  "metadata")
+                       (cons "perPage" (number-to-string wb--per-page))
+                       (cons "page"    (number-to-string page)))
+                 (when wb--annotations-filter-supported
+                   (list (cons "annotations" "1"))))))
+    (request (concat wallabag-host "/api/entries.json")
+      :headers (list (wb--auth-header))
+      :params  params
+      :parser  #'json-read
+      :success
+      (cl-function
+       (lambda (&key data &allow-other-keys)
+         (let* ((pages (wb--coerce-int (alist-get 'pages data)))
+                (items (append (alist-get 'items (alist-get '_embedded data)) nil))
+                (acc   accumulator))
+           (dolist (entry items)
+             (let ((norm (wb--normalise-entry entry)))
+               (when norm (push norm acc))))
+           (if (< page pages)
+               (wb--fetch-entries-page-async (1+ page) acc callback)
+             (message "Wallabag: fetched %d annotated entries" (length acc))
+             (funcall callback (nreverse acc))))))
+      :error
+      (cl-function
+       (lambda (&key error-thrown response &allow-other-keys)
+         (let ((code (request-response-status-code response)))
+           (if (eql code 404)
+               (progn
+                 (message "Wallabag: fetched %d annotated entries"
+                          (length accumulator))
+                 (funcall callback (nreverse accumulator)))
+             (error "Wallabag: entries fetch failed (%s): %S"
+                    code error-thrown))))))))
+
+;;;; ----------------------------------------------------------------
+;;;; Public interface
+;;;; ----------------------------------------------------------------
 
 (defun wallabag-synchronise-annotations ()
-  "Pull all annotated entries from Wallabag and sync them to Org-roam."
+  "Pull all annotated entries from Wallabag and sync them to Org-roam.
+Network I/O is async; `annotation--update-entries' runs in the final callback."
   (interactive)
-  (let ((entries (annotation--wallabag-gather-annotations)))
-    (message "Wallabag: fetched %d annotated entries" (length entries))
-    (annotation--update-entries entries)))
+  (message "Wallabag: starting async sync...")
+  (wb--detect-capabilities)
+  (wb--fetch-entries-page-async
+   1 nil
+   (lambda (entries)
+     (annotation--update-entries entries))))
 
 (defun wallabag-synchronise-annotation ()
   "Synchronise only the first annotated entry.  Useful for debugging."
   (interactive)
-  (let ((entries (list (car (annotation--wallabag-gather-annotations)))))
-    (annotation--update-entries entries)))
+  (message "Wallabag: fetching first annotated entry...")
+  (wb--detect-capabilities)
+  (wb--fetch-entries-page-async
+   1 nil
+   (lambda (entries)
+     (when entries
+       (annotation--update-entries (list (car entries)))))))
 
 (defun wallabag-reset-tokens ()
-  "Clear cached OAuth tokens, forcing re-authentication on next API call."
+  "Clear cached OAuth tokens and capability flags, forcing re-authentication."
   (interactive)
-  (setq wb--access-token  nil
-        wb--refresh-token nil
-        wb--token-expiry  nil)
-  (message "Wallabag: tokens cleared"))
+  (setq wb--access-token          nil
+        wb--refresh-token         nil
+        wb--token-expiry          nil
+        wb--capabilities-detected nil)
+  (message "Wallabag: tokens and capabilities cleared"))
 
 (provide 'wallabag-backend)
 ;;; wallabag-backend.el ends here
