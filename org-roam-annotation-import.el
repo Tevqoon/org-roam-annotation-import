@@ -219,15 +219,26 @@ URL may be nil. ENTRY-TITLE is used as the link description."
       quote)))
 
 (defun annotation--set-anki-properties (tags)
-  "Set ANKI_NOTE_TYPE, ANKI_DECK, ANKI_TAGS on the heading at point.
-TAGS is a space-separated tag string."
-  (org-set-property "ANKI_NOTE_TYPE" annotation-anki-note-type)
-  (org-set-property "ANKI_DECK" annotation-anki-deck)
-  (when (and tags (not (string-empty-p tags)))
-    (org-delete-property "ANKI_TAGS")
+  "Set ANKI_NOTE_TYPE, ANKI_DECK, ANKI_TAGS on the heading at point."
+  (unless (equal (org-entry-get nil "ANKI_NOTE_TYPE") annotation-anki-note-type)
+    (org-set-property "ANKI_NOTE_TYPE" annotation-anki-note-type))
+  (unless (equal (org-entry-get nil "ANKI_DECK") annotation-anki-deck)
+    (org-set-property "ANKI_DECK" annotation-anki-deck))
+  (when (and tags (not (string-empty-p tags))
+             (not (equal (org-entry-get nil "ANKI_TAGS") tags)))
     (org-set-property "ANKI_TAGS" tags)))
 
 ;;;; Annotation processing
+
+(defun annotation--entry-updated-at (entry)
+  "Return the latest annotation :updated-at in ENTRY, or nil.
+Only annotation timestamps are considered, since those are what get
+stored as `Updated-at' properties; the entry's own :updated-at is
+ignored because it is never persisted and drifts independently."
+  (let ((times (delq nil
+                     (mapcar (lambda (a) (plist-get a :updated-at))
+                             (plist-get entry :annotations)))))
+    (car (sort times #'string>))))
 
 (defun annotation--id-matches-p (annotation-id)
   "Predicate: heading at point has matching Annotation-ID property."
@@ -337,7 +348,11 @@ Find existing by id and update, or insert new."
                     (annotation--process-annotation annotation title url)))
                 (save-buffer)
                 (widen)
-		(buffer-file-name)))))))))
+		(if (buffer-modified-p)
+                    (progn
+                      (save-buffer)
+                      (buffer-file-name))
+                  nil)))))))))
 
 (defvar annotation--recently-modified-files nil
   "List of files modified by the most recent `annotation--update-entries' call.")
