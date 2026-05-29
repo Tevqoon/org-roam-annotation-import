@@ -183,7 +183,8 @@ already present -- \"...+01:00\" -- the string is returned unchanged."
         :quote      (or (alist-get 'quote annot) "")
         :text       (or (alist-get 'text  annot) "")
         :created-at (wb--fix-timestamp (alist-get 'created_at annot))
-        :updated-at (wb--fix-timestamp (alist-get 'updated_at annot))))
+        :updated-at (wb--fix-timestamp (alist-get 'updated_at annot))
+        :anki       t))
 
 (defun wb--normalise-entry (entry)
   "Convert raw entry alist ENTRY into a plist for `annotation--update-entries'.

@@ -1,7 +1,7 @@
 ;;; org-roam-annotation-import.el --- Sync annotation highlights with Org-roam -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
-;; Version: 0.3
+;; Version: 0.4
 ;; Package-Requires: ((emacs "27.1") (org "9.4") (org-roam "2.0"))
 ;; Keywords: org, org-roam, annotations
 
@@ -21,13 +21,18 @@
 ;;; Commentary:
 
 ;; This package integrates annotation highlight syncing with Org-roam.
-;; Annotations are exported as anki-editor flashcards: each annotation
-;; heading carries ANKI_NOTE_TYPE / ANKI_DECK / ANKI_TAGS properties,
-;; with a `Front' subheading (quote + source link) and an optional
-;; `Hint' subheading (the user's note).
+;; Annotations are optionally exported as anki-editor flashcards: each
+;; annotation heading carries ANKI_NOTE_TYPE / ANKI_DECK / ANKI_TAGS
+;; properties only when the annotation plist contains :anki t.
 ;;
-;; Backends (wallabag, koreader, ...) produce entry plists which this
-;; module writes into org-roam nodes.
+;; The content written for each annotation is controlled by :write-fn
+;; in the annotation plist.  If absent, the default
+;; `annotation--write-annotation-content' is used, which produces the
+;; standard Front/Hint heading structure.  Backends that want different
+;; structure (e.g. Zotero) supply their own writer.
+;;
+;; Backends (wallabag, zotero, koreader, ...) produce entry plists
+;; which this module writes into org-roam nodes.
 
 ;;; Code:
 
@@ -57,6 +62,23 @@
   "Anki deck used for exported annotations."
   :group 'annotation
   :type 'string)
+
+(defcustom annotation-default-json-directory nil
+  "Default directory containing JSON annotation exports.
+Used by file-based backends (e.g. KOReader) as the starting point
+for interactive file/directory prompts.  nil means no default."
+  :group 'annotation
+  :type '(choice (directory :tag "Directory") (const :tag "None" nil)))
+
+(defcustom annotation-auto-manual t
+  "When non-nil, stamp :Manual: t on each annotation as it is created.
+This freezes the quote/Front body immediately after the first import,
+so later re-syncs never overwrite it — useful when imported text needs
+hand-correction (e.g. garbled LaTeX from PDF OCR).  Notes/Hint and
+properties continue to sync regardless.  Set to nil to import without
+the guard and add :Manual: t manually only where wanted."
+  :group 'annotation
+  :type 'boolean)
 
 (defun annotation-debug (level msg &rest args)
   "Print debug message MSG at debug LEVEL with ARGS."
@@ -100,6 +122,21 @@ colon is safe), hyphens, periods, and alphanumerics."
    ((numberp id) (number-to-string id))
    (t (format "%s" id))))
 
+(defun annotation--generate-id (backend &rest parts)
+  "Generate a stable annotation ID for BACKEND from PARTS.
+PARTS are hashed together so that the same content always yields
+the same ID across re-imports.  Use this for sources that lack a
+stable server-side identifier (KOReader, plain-text, clipboard).
+
+The BACKEND name is prefixed (and folded into the hash) so IDs from
+different backends can never collide.  nil parts are ignored."
+  (let* ((clean (delq nil (mapcar (lambda (p)
+                                    (and p (format "%s" p)))
+                                  parts)))
+         (payload (mapconcat #'identity (cons backend clean) "\0"))
+         (digest  (secure-hash 'sha1 payload)))
+    (format "%s-%s" backend (substring digest 0 16))))
+
 ;;;; Org-roam node access
 
 (defun annotation--org-roam-node-open-or-create (node)
@@ -109,7 +146,8 @@ colon is safe), hyphens, periods, and alphanumerics."
     (org-roam-capture-
      :node node
      :templates '(("d" "default" plain "%?"
-                   :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org" "#+title: ${title}\n#+startup: content")
+                   :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
+                                      "#+title: ${title}\n#+startup: content")
                    :unnarrowed t
                    :immediate-finish t))
      :props '(:finalize find-file)))
@@ -218,15 +256,62 @@ URL may be nil. ENTRY-TITLE is used as the link description."
         (concat quote "\n\n" source-line)
       quote)))
 
-(defun annotation--set-anki-properties (tags)
-  "Set ANKI_NOTE_TYPE, ANKI_DECK, ANKI_TAGS on the heading at point."
+(defun annotation--resolve-anki-deck (anki)
+  "Resolve an :anki plist value ANKI to a deck name string, or nil.
+nil/absent  -> nil   (do not ankify)
+t           -> `annotation-anki-deck' (the default deck)
+a string    -> that string (a non-default deck)"
+  (cond
+   ((null anki) nil)
+   ((eq anki t) annotation-anki-deck)
+   ((stringp anki) anki)
+   (t annotation-anki-deck)))
+
+(defun annotation--set-anki-properties (tags deck)
+  "Set ANKI_NOTE_TYPE, ANKI_DECK (to DECK), ANKI_TAGS on the heading at point."
   (unless (equal (org-entry-get nil "ANKI_NOTE_TYPE") annotation-anki-note-type)
     (org-set-property "ANKI_NOTE_TYPE" annotation-anki-note-type))
-  (unless (equal (org-entry-get nil "ANKI_DECK") annotation-anki-deck)
-    (org-set-property "ANKI_DECK" annotation-anki-deck))
+  (when (and deck (not (equal (org-entry-get nil "ANKI_DECK") deck)))
+    (org-set-property "ANKI_DECK" deck))
   (when (and tags (not (string-empty-p tags))
              (not (equal (org-entry-get nil "ANKI_TAGS") tags)))
     (org-set-property "ANKI_TAGS" tags)))
+
+;;;; Default annotation content writer
+
+(defun annotation--write-annotation-content (annotation entry-title entry-url)
+  "Write properties + Front + Hint into the annotation heading at point.
+ANNOTATION is the plist. ENTRY-TITLE, ENTRY-URL are parent entry data.
+
+When the heading has a Manual property of t, the Front body is left
+untouched (so hand-edited content — e.g. corrected LaTeX — survives
+re-import).  Hint and properties are still refreshed from the source.
+
+Anki properties are set when ANNOTATION's :anki value is non-nil:
+t uses the default deck (`annotation-anki-deck'), a string names a
+specific deck.  If ANNOTATION contains :write-fn, that function is
+called instead of this one — see `annotation--process-annotation'."
+  (let* ((updated-at (plist-get annotation :updated-at))
+         (quote      (plist-get annotation :quote))
+         (text       (plist-get annotation :text))
+         (chapter    (plist-get annotation :chapter))
+         (page       (plist-get annotation :page))
+         (source     (plist-get annotation :source))
+         (manual-p   (string= "t" (org-entry-get nil "Manual")))
+         (deck       (annotation--resolve-anki-deck (plist-get annotation :anki)))
+         (front-body (annotation--format-front-body quote entry-url entry-title))
+         (tags       (annotation--current-outline-tags entry-title)))
+    (when updated-at (org-set-property "Updated-at" updated-at))
+    (when source     (org-set-property "Source"     source))
+    (when chapter    (org-set-property "Chapter"    chapter))
+    (when page       (org-set-property "Page"       (format "%s" page)))
+    ;; Anki export: deck resolved from :anki (nil disables)
+    (when deck
+      (annotation--set-anki-properties tags deck))
+    ;; Front: protected when Manual is set
+    (unless manual-p
+      (annotation--upsert-child-heading "Front" front-body))
+    (annotation--upsert-child-heading "Hint"  text)))
 
 ;;;; Annotation processing
 
@@ -246,41 +331,27 @@ ignored because it is never persisted and drifts independently."
     (let ((heading-id (org-entry-get nil "Annotation-ID")))
       (and heading-id (string= heading-id annotation-id)))))
 
-(defun annotation--write-annotation-content (annotation entry-title entry-url)
-  "Write properties + Front + Hint into the annotation heading at point.
-ANNOTATION is the plist. ENTRY-TITLE, ENTRY-URL are parent entry data."
-  (let* ((updated-at (plist-get annotation :updated-at))
-         (quote      (plist-get annotation :quote))
-         (text       (plist-get annotation :text))
-         (chapter    (plist-get annotation :chapter))
-         (page       (plist-get annotation :page))
-         (source     (plist-get annotation :source))
-         (front-body (annotation--format-front-body quote entry-url entry-title))
-         (tags       (annotation--current-outline-tags entry-title)))
-    (when updated-at (org-set-property "Updated-at" updated-at))
-    (when source     (org-set-property "Source"     source))
-    (when chapter    (org-set-property "Chapter"    chapter))
-    (when page       (org-set-property "Page"       (format "%s" page)))
-    (annotation--set-anki-properties tags)
-    (annotation--upsert-child-heading "Front" front-body)
-    (annotation--upsert-child-heading "Hint"  text)))
-
 (defun annotation--process-annotation (annotation entry-title entry-url)
   "Process ANNOTATION in the container heading at point.
-Find existing by id and update, or insert new."
+Find existing by id and update, or insert new.
+
+The content writer is determined by :write-fn in ANNOTATION.
+If absent, `annotation--write-annotation-content' is used."
   (let* ((annotation-id (annotation--id-as-string (plist-get annotation :id)))
-         (parent-level  (or (org-current-level) 0)))
+         (parent-level  (or (org-current-level) 0))
+         (write-fn      (or (plist-get annotation :write-fn)
+                            #'annotation--write-annotation-content)))
     (save-excursion
       (if (annotation--org-find-subheading
            (annotation--id-matches-p annotation-id))
           ;; Existing annotation: check if it actually changed.
-          (let* ((stored-updated-at (org-entry-get nil "Updated-at"))
+          (let* ((stored-updated-at   (org-entry-get nil "Updated-at"))
                  (incoming-updated-at (plist-get annotation :updated-at)))
             (if (and stored-updated-at
                      incoming-updated-at
                      (string= stored-updated-at incoming-updated-at))
                 (annotation-debug 1 "Skipping unchanged annotation %s" annotation-id)
-              (annotation--write-annotation-content annotation entry-title entry-url)))
+              (funcall write-fn annotation entry-title entry-url)))
         ;; New annotation: insert heading, then write content.
         (let (new-heading-pos)
           (save-excursion
@@ -290,7 +361,11 @@ Find existing by id and update, or insert new."
             (insert (make-string (1+ parent-level) ?*) " Annotation\n"))
           (goto-char new-heading-pos)
           (org-set-property "Annotation-ID" annotation-id)
-          (annotation--write-annotation-content annotation entry-title entry-url))))))
+          ;; Write the body FIRST (the Manual guard must see no flag yet),
+          ;; then stamp Manual so subsequent syncs leave the quote alone.
+          (funcall write-fn annotation entry-title entry-url)
+          (when annotation-auto-manual
+            (org-set-property "Manual" "t")))))))
 
 ;;;; Chapter container
 
@@ -348,7 +423,7 @@ Find existing by id and update, or insert new."
                     (annotation--process-annotation annotation title url)))
                 (save-buffer)
                 (widen)
-		(if (buffer-modified-p)
+                (if (buffer-modified-p)
                     (progn
                       (save-buffer)
                       (buffer-file-name))
