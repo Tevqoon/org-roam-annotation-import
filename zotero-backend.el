@@ -307,7 +307,7 @@ ANNOTATION is the plist, ENTRY-TITLE and ENTRY-URL are parent data.
          (color       (plist-get annotation :color))
          (manual-p    (string= "t" (org-entry-get nil "Manual")))
          (color-tag   (zotero--color-tag color))
-         (tags        (annotation--current-outline-tags entry-title)))
+         (citekey     (plist-get annotation :citekey)))
 
     (when updated-at  (org-set-property "Updated-at"  updated-at))
     (when source      (org-set-property "Source"      source))
@@ -315,10 +315,12 @@ ANNOTATION is the plist, ENTRY-TITLE and ENTRY-URL are parent data.
     (when zotero-link (org-set-property "Zotero-Link" zotero-link))
     (when color       (org-set-property "Color"       color))
 
-    ;; Quote: protected when Manual is set
+    ;; Front: the highlighted text + source link. Protected when Manual
+    ;; is set, so hand-corrected LaTeX survives re-import.  Named "Front"
+    ;; to match the Basic note type's field (same as the Wallabag backend).
     (unless manual-p
       (annotation--upsert-child-heading
-       "Quote"
+       "Front"
        (when (and quote-text (not (string-empty-p quote-text)))
          (concat quote-text
                  (when (and (or zotero-link entry-url) entry-title)
@@ -327,21 +329,28 @@ ANNOTATION is the plist, ENTRY-TITLE and ENTRY-URL are parent data.
                            entry-title
                            (or page "?")))))))
 
-    ;; Comment: always sync from Zotero
-    (annotation--upsert-child-heading "Comment" comment)
+    ;; Hint: your Zotero comment.  Always synced.  Named "Hint" to match
+    ;; the custom Hint field added to the Basic note type.
+    (annotation--upsert-child-heading "Hint" comment)
 
-    ;; Anki: deck resolved from :anki (nil disables); color folded into tags
+    ;; Anki: deck resolved from :anki (nil disables).  Tags are the
+    ;; citekey (@key) plus the highlight color — both space-free, so they
+    ;; stay as distinct Anki tags with no %20 encoding.
     (let ((deck (annotation--resolve-anki-deck (plist-get annotation :anki))))
       (when deck
-        (let ((full-tags (if color-tag (concat tags " " color-tag) tags)))
+        (let* ((parts (delq nil (list (and citekey (concat "@" citekey))
+                                      color-tag)))
+               (full-tags (string-join parts " ")))
           (annotation--set-anki-properties full-tags deck))))))
 
 ;;;; ----------------------------------------------------------------
 ;;;; Normalisation
 ;;;; ----------------------------------------------------------------
 
-(defun zotero--normalise-annotation (data attach-key)
-  "Build an annotation plist from raw annotation DATA under ATTACH-KEY."
+(defun zotero--normalise-annotation (data attach-key citekey)
+  "Build an annotation plist from raw annotation DATA under ATTACH-KEY.
+CITEKEY is the parent paper's Better BibTeX citekey (or nil), stored
+on the plist so the writer can use it as the Anki tag."
   (let* ((ann-key (alist-get 'key data))
          (page    (alist-get 'annotationPageLabel data))
          (quote   (or (alist-get 'annotationText data) ""))
@@ -353,6 +362,7 @@ ANNOTATION is the plist, ENTRY-TITLE and ENTRY-URL are parent data.
           :text        comment
           :page        page
           :color       color
+          :citekey     citekey
           :zotero-link (zotero--pdf-link attach-key page ann-key)
           :updated-at  updated
           :source      "Zotero"
@@ -478,9 +488,10 @@ Returns entries grouped by top-level paper, each ready for
         (let* ((d          (alist-get 'data item))
                (attach-key (alist-get 'parentItem d))
                (top-key    (and attach-key
-                                (alist-get 'parentItem (gethash attach-key attach-table)))))
+                                (alist-get 'parentItem (gethash attach-key attach-table))))
+               (citekey    (and top-key (gethash top-key citekey-table))))
           (when top-key
-            (push (zotero--normalise-annotation d attach-key)
+            (push (zotero--normalise-annotation d attach-key citekey)
                   (gethash top-key by-top)))))
 
       ;; Build one entry per top item.
