@@ -1,3 +1,197 @@
-* org-roam-annotation-import
+#+title: org-roam-annotation-import
+#+startup: showall
 
-Inspired by [[https://github.com/CountGreven/org-readwise][CountGreven's org-readwise]]. An Emacs package to facilitate importing annotations into org-roam. Separating the actual insertion from different backends to import annotations from. The first goal is to support both Wallabag annotations as well as KOReader metadata. Very experimental with no support.
+* ⚠ Disclaimer
+
+*This whole thing is vibecoded.* It was built iteratively with an LLM to
+scratch a personal itch, is *very experimental*, carries *no warranty and no
+support*, and may eat your notes. Read the code, keep your org-roam under
+version control, and try it on a throwaway directory first. You have been
+warned.
+
+Inspired by [[https://github.com/CountGreven/org-readwise][CountGreven's org-readwise]].
+
+* What it is
+
+An Emacs package that pulls highlights/annotations from several sources
+(Wallabag, Zotero, KOReader) into [[https://www.orgroam.com/][org-roam]] nodes, and optionally exports
+each annotation as an [[https://github.com/anki-editor/anki-editor][anki-editor]] flashcard. The insertion engine is
+separated from the source-specific backends.
+
+* Architecture
+
+#+begin_example
+  backend (wallabag / zotero / koreader)
+        │  produces a list of ENTRY plists
+        ▼
+  org-roam-annotation-import.el   ← the core engine
+        │  per entry: find/create org-roam node
+        │  per annotation: upsert a heading under "* Annotations"
+        ▼
+  org-roam note on disk  ──(anki-editor)──▶  Anki
+#+end_example
+
+** Core — =org-roam-annotation-import.el=
+
+Source-agnostic. Given entry plists it:
+
+- Finds an org-roam node by ROAM_REF / title, or creates one via
+  =annotation-capture-templates=.
+- Upserts each annotation as a heading under =* Annotations= (optionally
+  nested under a =:chapter=), keyed by an =Annotation-ID= property.
+- Does *incremental sync*: an annotation whose stored =Updated-at= matches
+  the incoming one is skipped.
+- *Manual guard*: with =annotation-auto-manual= (default =t=), each new
+  annotation is stamped =:Manual: t=, which freezes its quote/Front body so
+  hand-edits (e.g. corrected LaTeX) survive re-import. Notes/Hint and
+  properties keep syncing.
+- Sets =ANKI_NOTE_TYPE= / =ANKI_DECK= / =ANKI_TAGS= when an annotation's
+  =:anki= value is non-nil.
+
+A *backend* only has to build entry plists and call
+=annotation--update-entries=. Shape:
+
+#+begin_src emacs-lisp
+  (list :title "..." :url "..." :author "..." :source-tag "wallabag"
+        :annotations
+        (list (list :id "stable-id" :quote "highlight" :text "note"
+                    :updated-at "ISO-8601" :anki t
+                    ;; optional: :chapter :page :color :write-fn ...
+                    )))
+#+end_src
+
+** Backends
+
+| File                                  | Source                | Transport                          |
+|---------------------------------------+-----------------------+------------------------------------|
+| =wallabag-backend.el=                 | Wallabag              | REST API (OAuth2, async paging)    |
+| =zotero-backend.el=                   | Zotero 7 PDF annots   | local HTTP API + Better BibTeX RPC |
+| =koreader-json-backend.el=            | KOReader JSON exports | local files                        |
+| =js-anki-annotation-push.el=          | —                     | per-source anki-editor push helpers |
+
+* Requirements
+
+** Emacs packages
+
+- =emacs= 27.1+ (built with native JSON / libjansson — needed by
+  =json-parse-buffer= in the KOReader backend).
+- =org= 9.4+, =org-roam= 2.0+.
+- [[https://github.com/tkf/emacs-request][=request=]] — *required by the Wallabag and Zotero backends*. (Only declared
+  in zotero's header; install it regardless if you use either.)
+- [[https://github.com/anki-editor/anki-editor][=anki-editor=]] — only if you want Anki export / the push helpers.
+
+** External services / setup, per backend
+
+*Wallabag*
+- A Wallabag instance; v2.6+ gets a server-side =annotations=1= filter
+  (older works but filters client-side and is slower).
+- You must set these variables yourself (the backend reads but does *not*
+  define them — they normally come from the =wallabag.el= package config):
+  =wallabag-host=, =wallabag-username=, =wallabag-password=,
+  =wallabag-clientid=, =wallabag-secret=.
+
+*Zotero*
+- Zotero 7, running, with /Settings → Advanced → "Allow other applications
+  on this computer to communicate with Zotero"/ enabled (local API on
+  =localhost:23119=).
+- [[https://retorque.re/zotero-better-bibtex/][Better BibTeX]] — used to map Zotero item keys to citekeys so annotations
+  land in the same note as your =citar-org-roam= literature note. Optional:
+  without it, matching falls back to =zotero://select= URL then title.
+- =citar-org-roam= — *optional*, only for =zotero-synchronise-annotation-at-point=.
+
+*KOReader*
+- The KOReader "Export highlights" plugin, set to *JSON* format. Point the
+  importers at the exported =.json= files.
+
+*Anki export (any source)*
+- Anki running with the [[https://ankiweb.net/shared/info/2055492159][AnkiConnect]] add-on (that's how anki-editor pushes).
+- A note type matching =annotation-anki-note-type= (default ="Basic"=) that
+  has both a *Front* and a *Hint* field. Stock Anki "Basic" has Front/Back,
+  *not* Hint — add a =Hint= field to Basic, or set =annotation-anki-note-type=
+  to a custom type that has one.
+
+* Setup
+
+Single =use-package= block. Uses =:vc= to install from GitHub; swap in
+=:load-path "/path/to/clone/"= if you cloned it manually. =:demand t= +
+=:after= guarantees =org=, =org-roam= and =anki-editor= are loaded before the
+backends are =require='d in =:config=.
+
+#+begin_src emacs-lisp
+  (use-package org-roam-annotation-import
+    :demand t
+    :after (org org-roam anki-editor)
+    :vc (:url "https://github.com/Tevqoon/org-roam-annotation-import" :rev :newest)
+    ;; :load-path "~/Documents/repos/org-roam-annotation-import/"  ; if cloned
+    :custom
+    (annotation-anki-deck "Annotations")            ; default deck
+    (annotation-auto-manual t)                       ; freeze quotes after 1st import
+    (zotero-anki-deck "Zotero")                      ; deck for Zotero cards
+    (zotero-literature-subdir "references")          ; match your citar-org-roam subdir
+    ;; (annotation-default-json-directory "~/koreader-exports/")
+    :config
+    ;; Backends + Anki push helpers all ship in this same repo.
+    (require 'wallabag-backend)
+    (require 'zotero-backend)
+    (require 'koreader-json-backend)
+    (require 'js-anki-annotation-push)
+    ;; Make zotero:// links from imported notes clickable.
+    (with-eval-after-load 'ol
+      (org-link-set-parameters
+       "zotero"
+       :follow (lambda (path _)
+                 (let ((uri (concat "zotero:" path)))
+                   (pcase system-type
+                     ('darwin    (call-process "open" nil nil nil uri))
+                     ('gnu/linux (call-process "xdg-open" nil nil nil uri))
+                     (_          (browse-url uri)))))))
+    :bind
+    (;; Sync (pull from source into org-roam)
+     ("C-c n p r a" . wallabag-synchronise-annotations)
+     ("C-c n p r z" . zotero-synchronise-annotations)
+     ;; Push (org-roam → Anki via anki-editor)
+     ("C-c n p z"   . js/anki-push-zotero)
+     ("C-c n p w"   . js/anki-push-wallabag)
+     ("C-c n p k"   . js/anki-push-koreader)
+     ("C-c n p A"   . js/anki-push-all-annotations)
+     ("C-c n p a"   . js/anki-push-recent-annotations)))
+#+end_src
+
+If you don't use Anki, drop =anki-editor= from =:after=, the
+=(require 'js-anki-annotation-push)= line, and the push keybindings.
+
+* Usage
+
+| Command                                  | What it does                                      |
+|------------------------------------------+---------------------------------------------------|
+| =wallabag-synchronise-annotations=       | Pull all annotated Wallabag entries               |
+| =wallabag-reset-tokens=                  | Drop cached OAuth tokens, force re-auth           |
+| =zotero-synchronise-annotations=         | Pull all Zotero annots (=C-u= → prompt SINCE date) |
+| =zotero-synchronise-annotation-at-point= | Sync only the current node's citekey              |
+| =zotero-ping=                            | Check the Zotero local API is reachable           |
+| =koreader-import-json-file=              | Import one KOReader JSON export                   |
+| =koreader-import-json-directory=         | Import every JSON file in a directory             |
+| =annotation-wipe-buffer=                 | Delete the =* Annotations= subtree (re-import fresh) |
+| =js/anki-push-*=                         | Push annotation files to Anki by source           |
+| =js/anki-push-recent-annotations=        | Push only files touched by the last sync          |
+
+Typical flow: bind/run a =*-synchronise-*= command to pull highlights, then a
+=js/anki-push-*= command to send the resulting cards to Anki.
+
+* Known issues / caveats
+
+- =js-anki-annotation-push.el= currently has =(require anki-editor)= *without
+  a quote* (should be ='anki-editor=) — as-is the file errors on load. It also
+  calls =anki-flashcard-clear-error-buffer=, =anki-flashcard-report-error=,
+  =anki-flashcard-error-buffer= and =my/anki-annotation-push-all=, which are
+  *not defined anywhere in this repo* (leftovers from the author's personal
+  config). The push helpers won't work until those are provided or stubbed.
+- Wallabag and KOReader nodes both only get an =:annotations:= tag (+ author
+  slug); KOReader additionally gets =:koreader:= via =koreader-json-backend.el=.
+  =js/anki-push-wallabag= therefore falls back to "annotated but not zotero,
+  not koreader".
+- =koreader-json-export-backend.el= is a near-duplicate of
+  =koreader-json-backend.el= that omits the =:source-tag=, so its nodes can't
+  be split out for per-source Anki push. *Use =koreader-json-backend.el=.*
+- =cl-lib= is used by =wallabag-backend.el= without being =require='d
+  explicitly (works because it's usually already loaded).
