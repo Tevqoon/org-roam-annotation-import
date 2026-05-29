@@ -571,12 +571,17 @@ With prefix arg, prompt for an ISO 8601 SINCE date to limit the sync."
   (let* ((since-arg (and since (not (string-empty-p since)) since))
          (entries   (zotero--collect-entries since-arg)))
     (message "Zotero: syncing %d paper(s) with annotations..." (length entries))
-    (let ((modified '()))
-      (dolist (entry entries)
-        (when-let ((file (zotero--process-entry entry)))
-          (push file modified)))
-      (setq modified (delete-dups (nreverse modified)))
-      (message "Zotero sync done: %d file(s) modified" (length modified)))))
+    ;; Populate the shared `annotation--recently-modified-files' (not a
+    ;; local var) so `my/anki-annotation-push-all' without a prefix arg
+    ;; pushes exactly the files this sync touched.
+    (setq annotation--recently-modified-files nil)
+    (dolist (entry entries)
+      (when-let ((file (zotero--process-entry entry)))
+        (push file annotation--recently-modified-files)))
+    (setq annotation--recently-modified-files
+          (delete-dups (nreverse annotation--recently-modified-files)))
+    (message "Zotero sync done: %d file(s) modified"
+             (length annotation--recently-modified-files))))
 
 ;;;###autoload
 (defun zotero-synchronise-annotation-at-point ()
@@ -597,9 +602,14 @@ With prefix arg, prompt for an ISO 8601 SINCE date to limit the sync."
                      entries)))
       (if (null matched)
           (message "Zotero: no annotations found for @%s" citekey)
+        (setq annotation--recently-modified-files nil)
         (dolist (entry matched)
-          (zotero--process-entry entry))
-        (message "Zotero: synced annotations for @%s" citekey)))))
+          (when-let ((file (zotero--process-entry entry)))
+            (push file annotation--recently-modified-files)))
+        (setq annotation--recently-modified-files
+              (delete-dups (nreverse annotation--recently-modified-files)))
+        (message "Zotero: synced @%s (%d file(s) modified)"
+                 citekey (length annotation--recently-modified-files))))))
 
 ;;;###autoload
 (defun zotero-ping ()
