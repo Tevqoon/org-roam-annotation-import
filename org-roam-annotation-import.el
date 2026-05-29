@@ -139,17 +139,28 @@ different backends can never collide.  nil parts are ignored."
 
 ;;;; Org-roam node access
 
+(defcustom annotation-capture-templates
+  '(("d" "default" plain "%?"
+     :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
+                        "#+title: ${title}\n#+startup: content")
+     :unnarrowed t
+     :immediate-finish t))
+  "Capture templates used when creating a new node for an annotation entry.
+Backends may let-bind this to control where new notes are filed and
+what header they get (e.g. a literature-note template under
+references/ with a :literature: filetag).  Must contain a single
+template with :immediate-finish t."
+  :group 'annotation
+  :type 'sexp)
+
 (defun annotation--org-roam-node-open-or-create (node)
-  "Find and open or create an Org-roam NODE."
+  "Find and open or create an Org-roam NODE.
+New nodes are created via `annotation-capture-templates'."
   (if (org-roam-node-file node)
       (org-roam-node-visit node nil t)
     (org-roam-capture-
      :node node
-     :templates '(("d" "default" plain "%?"
-                   :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
-                                      "#+title: ${title}\n#+startup: content")
-                   :unnarrowed t
-                   :immediate-finish t))
+     :templates annotation-capture-templates
      :props '(:finalize find-file)))
   (current-buffer))
 

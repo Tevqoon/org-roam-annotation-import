@@ -101,6 +101,13 @@ Value semantics mirror the :anki plist key:
                  (const :tag "Global default deck" t)
                  (const :tag "Disabled" nil)))
 
+(defcustom zotero-literature-subdir "references"
+  "Subdirectory of `org-roam-directory' for Zotero-created literature notes.
+Match this to your citar-org-roam subdir so that notes created by a
+Zotero-first import land in the same place as citar-created notes."
+  :group 'zotero-backend
+  :type 'string)
+
 (defcustom zotero-color-tag-alist
   '(("#ffd400" . "yellow")
     ("#ff6666" . "red")
@@ -396,6 +403,22 @@ ENTRY carries :citekey, :ref (ROAM_REF to persist), :select-url, :title."
       :refs  (delq nil (list ref))
       :id    (org-id-new)))))
 
+(defun zotero--literature-capture-templates (entry)
+  "Build an `annotation-capture-templates' value for ENTRY.
+Files the note under `zotero-literature-subdir' using the citekey as
+the filename when available (matching citar-org-roam), with a
+:literature: filetag and no startup line — matching a hand-made
+citar literature note."
+  (let* ((citekey (plist-get entry :citekey))
+         (fname   (if (and citekey (not (string-empty-p citekey)))
+                      (format "%s/%s.org" zotero-literature-subdir citekey)
+                    (format "%s/%%<%%Y%%m%%d%%H%%M%%S>-${slug}.org"
+                            zotero-literature-subdir))))
+    `(("d" "literature" plain "%?"
+       :if-new (file+head ,fname "#+title: ${title}\n#+filetags: :literature:")
+       :unnarrowed t
+       :immediate-finish t))))
+
 (defun zotero--process-entry (entry)
   "Find or create a node for ENTRY and upsert its annotations.
 Returns the modified file path, or nil if nothing changed."
@@ -406,6 +429,10 @@ Returns the modified file path, or nil if nothing changed."
            (annotations (plist-get entry :annotations))
            (incoming-updated-at (annotation--entry-updated-at entry))
            (node   (zotero--find-or-create-node entry))
+           ;; New nodes are created with a literature template matching
+           ;; citar-org-roam's location/header.
+           (annotation-capture-templates
+            (zotero--literature-capture-templates entry))
            (buffer (annotation--org-roam-node-open-or-create node)))
       (with-current-buffer buffer
         (let ((stored-updated-at (annotation--max-stored-updated-at)))
@@ -425,7 +452,7 @@ Returns the modified file path, or nil if nothing changed."
                     (unless (and existing
                                  (string-match-p (regexp-quote ref) existing))
                       (org-roam-ref-add ref))))
-                (org-roam-tag-add '("annotations" "zotero"))
+                (org-roam-tag-add '("annotations" "zotero" "literature"))
                 (when-let ((author (plist-get entry :author))
                            (slug   (annotation--slugify author)))
                   (org-roam-tag-add (list slug)))
