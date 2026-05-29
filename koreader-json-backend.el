@@ -90,6 +90,7 @@ SOURCE-TITLE is used for ID generation."
     (list :title       title
           :author      author
           :url         nil
+          :source-tag  "koreader"
           :updated-at  created-on
           :annotations annotations)))
 

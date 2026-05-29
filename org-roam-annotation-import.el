@@ -420,7 +420,8 @@ If absent, `annotation--write-annotation-content' is used."
               (let ((heading-level (org-current-level)))
                 (when heading-level (org-narrow-to-subtree))
                 (when url (org-roam-ref-add url))
-                (org-roam-tag-add '("annotations"))
+                (org-roam-tag-add
+                 (delq nil (list "annotations" (plist-get entry :source-tag))))
                 (when-let ((author (plist-get entry :author))
                            (slug   (annotation--slugify author)))
                   (org-roam-tag-add (list slug)))
@@ -432,13 +433,11 @@ If absent, `annotation--write-annotation-content' is used."
                   (save-excursion
                     (annotation--enter-chapter-container annotation)
                     (annotation--process-annotation annotation title url)))
-                (save-buffer)
                 (widen)
-                (if (buffer-modified-p)
-                    (progn
-                      (save-buffer)
-                      (buffer-file-name))
-                  nil)))))))))
+                ;; Reaching here means the entry's annotations were
+                ;; (re)written; save and report the file as modified.
+                (save-buffer)
+                (buffer-file-name)))))))))
 
 (defvar annotation--recently-modified-files nil
   "List of files modified by the most recent `annotation--update-entries' call.")

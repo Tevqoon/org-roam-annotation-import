@@ -460,11 +460,13 @@ Returns the modified file path, or nil if nothing changed."
                 (dolist (annotation annotations)
                   (save-excursion
                     (annotation--process-annotation annotation title select-url)))
-                (save-buffer)
                 (widen)
-                (if (buffer-modified-p)
-                    (progn (save-buffer) (buffer-file-name))
-                  nil)))))))))
+                ;; Reaching here means we entered the unless-block, i.e.
+                ;; this entry's annotations were (re)written.  Save and
+                ;; report the file as modified so the Anki pusher and
+                ;; `annotation--recently-modified-files' pick it up.
+                (save-buffer)
+                (buffer-file-name)))))))))
 
 ;;;; ----------------------------------------------------------------
 ;;;; Assembly -- fetch, walk hierarchy, build entries
