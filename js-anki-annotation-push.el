@@ -16,7 +16,7 @@
 ;; that ISN'T zotero", which lumps the two file-based sources together.
 
 (require 'cl-lib)
-(require anki-editor)
+(require 'anki-editor)
 
 ;;;; ----------------------------------------------------------------
 ;;;; Tag-based file selection

@@ -11,6 +11,8 @@ warned.
 
 Inspired by [[https://github.com/CountGreven/org-readwise][CountGreven's org-readwise]].
 
+The Anki module is incomplete.
+
 * What it is
 
 An Emacs package that pulls highlights/annotations from several sources
@@ -134,7 +136,7 @@ backends are =require='d in =:config=.
     (require 'wallabag-backend)
     (require 'zotero-backend)
     (require 'koreader-json-backend)
-    (require 'js-anki-annotation-push)
+    ;; (require 'js-anki-annotation-push) ; UNFINISHED!
     ;; Make zotero:// links from imported notes clickable.
     (with-eval-after-load 'ol
       (org-link-set-parameters
@@ -150,11 +152,13 @@ backends are =require='d in =:config=.
      ("C-c n p r a" . wallabag-synchronise-annotations)
      ("C-c n p r z" . zotero-synchronise-annotations)
      ;; Push (org-roam → Anki via anki-editor)
-     ("C-c n p z"   . js/anki-push-zotero)
-     ("C-c n p w"   . js/anki-push-wallabag)
-     ("C-c n p k"   . js/anki-push-koreader)
-     ("C-c n p A"   . js/anki-push-all-annotations)
-     ("C-c n p a"   . js/anki-push-recent-annotations)))
+     ;; Sorry, the dedicated anki export functions areincomplete
+     ;; ("C-c n p z"   . js/anki-push-zotero)
+     ;; ("C-c n p w"   . js/anki-push-wallabag)
+     ;; ("C-c n p k"   . js/anki-push-koreader)
+     ;; ("C-c n p A"   . js/anki-push-all-annotations)
+     ;; ("C-c n p a"   . js/anki-push-recent-annotations)
+     ))
 #+end_src
 
 If you don't use Anki, drop =anki-editor= from =:after=, the
@@ -179,10 +183,8 @@ Typical flow: bind/run a =*-synchronise-*= command to pull highlights, then a
 =js/anki-push-*= command to send the resulting cards to Anki.
 
 * Known issues / caveats
-
-- =js-anki-annotation-push.el= currently has =(require anki-editor)= *without
-  a quote* (should be ='anki-editor=) — as-is the file errors on load. It also
-  calls =anki-flashcard-clear-error-buffer=, =anki-flashcard-report-error=,
+- The Anki module is incompletely lifted 
+- It also calls =anki-flashcard-clear-error-buffer=, =anki-flashcard-report-error=,
   =anki-flashcard-error-buffer= and =my/anki-annotation-push-all=, which are
   *not defined anywhere in this repo* (leftovers from the author's personal
   config). The push helpers won't work until those are provided or stubbed.
