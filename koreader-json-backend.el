@@ -1,7 +1,7 @@
 ;;; koreader-json-backend.el --- Sync Koreader highlights with Org-roam -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
-;; Version: 0.2
+;; Version: 0.3
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -32,10 +32,19 @@
 ;; Hand-edited content is protected: set :Manual: t on an annotation
 ;; heading and its Front body survives re-import (handled by the core
 ;; default writer `annotation--write-annotation-content').
+;;
+;; Unlike server-backed sources, KOReader JSON titles come straight from
+;; ebook metadata and are often unreliable.  The import therefore prompts
+;; for the destination org-roam node (`koreader--select-node'): pick an
+;; existing note, or type a new title.  Book metadata (author, rating,
+;; genre, ...) is intentionally NOT managed here -- create proper book
+;; notes with `js-book-capture' first, then point this importer at them.
+;; Annotations are ankified into the shared default deck (`:anki t').
 
 ;;; Code:
 
 (require 'org-roam-annotation-import)
+(require 'org-roam)
 (require 'json)
 
 (defcustom koreader-json-file-pattern "\\.json\\'"
@@ -65,7 +74,9 @@ KOReader does not update `datetime' on note edits."
 
 (defun koreader--transform-entry (entry source-title)
   "Transform a KOReader ENTRY into the standard annotation format.
-SOURCE-TITLE is used for ID generation."
+SOURCE-TITLE is used for ID generation.  `:anki t' routes the
+annotation into the shared default deck (`annotation-anki-deck'),
+matching the Wallabag backend."
   (let ((text    (plist-get entry :text))
         (note    (plist-get entry :note))
         (page    (plist-get entry :page))
@@ -73,6 +84,7 @@ SOURCE-TITLE is used for ID generation."
         (datetime (plist-get entry :datetime)))
     (list :id         (koreader--generate-annotation-id entry source-title)
           :source     "KOReader"
+          :anki       t
           :quote      text
           :text       note
           :page       page
@@ -94,10 +106,28 @@ SOURCE-TITLE is used for ID generation."
           :updated-at  created-on
           :annotations annotations)))
 
+(defun koreader--select-node (default-title)
+  "Prompt for the org-roam node to receive KOReader annotations.
+DEFAULT-TITLE (from the JSON metadata) pre-fills the prompt.  Selecting
+an existing note returns its node; typing a new title returns a node
+with no file, which `annotation--org-roam-node-open-or-create' files
+via `annotation-capture-templates' on first write.
+
+Book metadata is intentionally not touched here -- create proper book
+notes with `js-book-capture' first, then point this importer at them."
+  (let ((node (org-roam-node-read default-title nil nil nil
+                                  "KOReader note (select or type new title): ")))
+    (if (and node (org-roam-node-title node))
+        node
+      (user-error "No note selected"))))
+
 (defun koreader--import-json-file (file)
-  "Import annotations from a single KOReader JSON FILE."
+  "Import annotations from a single KOReader JSON FILE.
+Prompts for the destination org-roam node."
   (let* ((json-data (koreader--parse-json-file file))
-         (entry     (koreader--transform-json json-data)))
+         (entry     (koreader--transform-json json-data))
+         (node      (koreader--select-node (plist-get entry :title))))
+    (setq entry (plist-put entry :node node))
     (annotation-debug 1 "Importing from: %s" file)
     (annotation-debug 2 "Title: %s, Annotations: %d"
                       (plist-get entry :title)
@@ -111,7 +141,8 @@ SOURCE-TITLE is used for ID generation."
 ;;;###autoload
 (defun koreader-import-json-file (file)
   "Import annotations from a KOReader JSON FILE.
-Prompts for file selection interactively."
+Prompts for file selection interactively, then for the destination
+org-roam node."
   (interactive
    (list (read-file-name "KOReader JSON file: "
                          annotation-default-json-directory
@@ -124,7 +155,8 @@ Prompts for file selection interactively."
 ;;;###autoload
 (defun koreader-import-json-directory (directory)
   "Import annotations from all KOReader JSON files in DIRECTORY.
-Uses `annotation-default-json-directory' if set, otherwise prompts."
+Uses `annotation-default-json-directory' if set, otherwise prompts.
+Prompts once per file for its destination org-roam node."
   (interactive
    (list (read-directory-name "Directory with KOReader JSON files: "
                               annotation-default-json-directory)))

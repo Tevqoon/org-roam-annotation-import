@@ -399,13 +399,16 @@ If absent, `annotation--write-annotation-content' is used."
     (car (sort times #'string>))))
 
 (defun annotation--process-entry (entry)
-  "Find or create a node for ENTRY, then upsert each of its annotations."
+  "Find or create a node for ENTRY, then upsert each of its annotations.
+If ENTRY carries a :node, that node is used directly and the
+title/url-based resolution is skipped."
   (save-window-excursion
     (let* ((url         (plist-get entry :url))
            (title       (plist-get entry :title))
            (annotations (plist-get entry :annotations))
            (incoming-updated-at (annotation--entry-updated-at entry))
-           (node (or (when url (org-roam-node-from-ref url))
+           (node (or (plist-get entry :node)
+                     (when url (org-roam-node-from-ref url))
                      (org-roam-node-from-title-or-alias title)
                      (org-roam-node-create :title title
                                            :refs (when url (list url))
