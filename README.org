@@ -70,6 +70,7 @@ A *backend* only has to build entry plists and call
 | =zotero-backend.el=                   | Zotero 7 PDF annots   | local HTTP API + Better BibTeX RPC |
 | =koreader-json-backend.el=            | KOReader JSON exports | local files                        |
 | =js-anki-annotation-push.el=          | —                     | per-source anki-editor push helpers |
+| =highlights-pdf-backend.el=           | Highlights/any PDF     | PyMuPDF script → JSON → local files |
 
 * Requirements
 
@@ -104,6 +105,37 @@ A *backend* only has to build entry plists and call
 *KOReader*
 - The KOReader "Export highlights" plugin, set to *JSON* format. Point the
   importers at the exported =.json= files.
+
+*Highlights / PDF*
+- The PDF→JSON half is a standalone Python script,
+  =scripts/pdf-annotation-extractor.py=, requiring [[https://pymupdf.readthedocs.io/][PyMuPDF]]. It reads
+  /standard/ PDF annotations (as written by [[https://highlightsapp.net/][Highlights]] on iPad/Mac, and
+  also Skim, Preview, Acrobat — Highlights does not lock files in), so there
+  is no proprietary sidecar to parse.
+- Homebrew/system Python is usually externally managed (PEP 668), so install
+  PyMuPDF into a venv rather than fighting =pip=:
+  #+begin_src sh
+    python3 -m venv ~/.venvs/pdf-annot
+    ~/.venvs/pdf-annot/bin/pip install -r scripts/../requirements.txt
+  #+end_src
+  Then point =highlights-pdf-python= at that interpreter (see Setup). The
+  /script location/ needs no configuration — it is auto-located next to the
+  =.el= files — but the /interpreter/ is environment-specific and must be set.
+- What it extracts: highlight/underline/strikeout/squiggly become
+  text-markup annotations whose marked text is recovered from the page word
+  list per quad (overlapping OCR marked-content groups are deduplicated, so
+  doubled text is collapsed). Rectangle "snapshot" selections become =Square=
+  annotations rasterised to PNG under an =images/= dir beside the JSON, linked
+  with =[[file:...]]= via a custom =:write-fn=. Sticky/typewriter notes become
+  note-only annotations.
+- Annotation ID prefers the PDF =/NM= name; when absent (common with
+  third-party readers) it falls back to a content hash. The PDF =xref= is
+  deliberately /not/ used for identity (unstable across PDF rewrites).
+- /Caveat — OCR'd PDFs:/ the script reads the text layer, so it inherits its
+  quality. Doubling artifacts are fixed; irreducible OCR damage (dropped
+  characters, broken drop caps spanning two lines) is not — those you hand-fix
+  in org, which the Manual guard protects. Badly OCR'd backlogs are better
+  re-run through =ocrmypdf --redo-ocr= before annotating.
 
 *Anki export (any source)*
 - Anki running with the [[https://ankiweb.net/shared/info/2055492159][AnkiConnect]] add-on (that's how anki-editor pushes).
@@ -178,6 +210,9 @@ If you don't use Anki, drop =anki-editor= from =:after=, the
 | =annotation-wipe-buffer=                 | Delete the =* Annotations= subtree (re-import fresh) |
 | =js/anki-push-*=                         | Push annotation files to Anki by source           |
 | =js/anki-push-recent-annotations=        | Push only files touched by the last sync          |
+| =highlights-pdf-import-pdf=              | Extract a PDF's annots and import (one keybinding) |
+| =highlights-pdf-import-json-file=        | Import one already-extracted JSON                 |
+| =highlights-pdf-import-json-directory=   | Import every extractor JSON in a directory        |
 
 Typical flow: bind/run a =*-synchronise-*= command to pull highlights, then a
 =js/anki-push-*= command to send the resulting cards to Anki.
