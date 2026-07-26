@@ -17,6 +17,7 @@
 
 (require 'cl-lib)
 (require 'anki-editor)
+(require 'org-roam-annotation-import) ; for `annotation--recently-modified-files'
 
 ;;;; ----------------------------------------------------------------
 ;;;; Tag-based file selection
