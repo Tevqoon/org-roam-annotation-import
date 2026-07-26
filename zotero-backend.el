@@ -1,8 +1,8 @@
-;;; zotero-backend.el --- Sync Zotero PDF annotations with Org-roam -*- lexical-binding: t; -*-
+;;; zotero-backend.el --- Sync Zotero PDF annotations with vulpea -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
-;; Version: 0.2
-;; Package-Requires: ((emacs "27.1") (org "9.4") (org-roam "2.0") (request "0.3"))
+;; Version: 0.3
+;; Package-Requires: ((emacs "29.1") (org "9.4") (vulpea "2.0") (request "0.3"))
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 ;;     Zotero" enabled.
 ;;   - Better BibTeX installed (used via its JSON-RPC endpoint to map
 ;;     Zotero item keys to citekeys, so annotations land in the same
-;;     org-roam note as your citar/citar-org-roam literature note).
+;;     vulpea note as your citar/citar-vulpea literature note).
 ;;
 ;; Data flow (all over localhost, synchronous):
 ;;   1. GET items?itemType=annotation        -> all annotations
@@ -54,6 +54,7 @@
 ;;; Code:
 
 (require 'org-roam-annotation-import)
+(require 'vulpea)
 (require 'request)
 (require 'json)
 (require 'subr-x)
@@ -102,9 +103,10 @@ Value semantics mirror the :anki plist key:
                  (const :tag "Disabled" nil)))
 
 (defcustom zotero-literature-subdir "references"
-  "Subdirectory of `org-roam-directory' for Zotero-created literature notes.
-Match this to your citar-org-roam subdir so that notes created by a
-Zotero-first import land in the same place as citar-created notes."
+  "Subdirectory of your notes directory for Zotero-created literature notes.
+Match this to your `citar-vulpea-notes-directory' subdir so that notes
+created by a Zotero-first import land in the same place as
+citar-created notes."
   :group 'zotero-backend
   :type 'string)
 
@@ -377,50 +379,41 @@ on the plist so the writer can use it as the Anki tag."
           :write-fn    #'zotero--write-annotation-content)))
 
 ;;;; ----------------------------------------------------------------
-;;;; Node lookup (citekey-aware) and entry processing
+;;;; Note lookup (citekey-aware) and entry processing
 ;;;; ----------------------------------------------------------------
 
-(defun zotero--find-or-create-node (entry)
-  "Return an org-roam node for ENTRY, preferring citekey lookup.
-ENTRY carries :citekey, :ref (ROAM_REF to persist), :select-url, :title."
+(defun zotero--find-note (entry)
+  "Return an already-existing vulpea note for ENTRY, or nil.
+ENTRY carries :citekey, :ref (ROAM_REF to persist), :select-url, :title.
+Preferring citekey lookup over title lookup avoids creating a
+duplicate note when the title text drifts slightly between imports."
   (let* ((citekey    (plist-get entry :citekey))
          (ref        (plist-get entry :ref))
          (select-url (plist-get entry :select-url))
          (title      (plist-get entry :title)))
     (or
-     ;; 1. Citekey via ROAM_REFS @key (the form citar-org-roam stores)
+     ;; 1. Citekey via ROAM_REFS @key (the form citar-vulpea stores)
      (when citekey
-       (org-roam-node-from-ref (concat "@" citekey)))
+       (annotation--vulpea-note-by-ref (concat "@" citekey)))
      ;; 2. zotero://select URL ref
      (when (and select-url (not (equal ref select-url)))
-       (org-roam-node-from-ref select-url))
-     ;; 3. Title (may throw on ambiguous match -- guard it)
+       (annotation--vulpea-note-by-ref select-url))
+     ;; 3. Title (first match if ambiguous)
      (when title
-       (ignore-errors (org-roam-node-from-title-or-alias title)))
-     ;; 4. Create new, seeded with the lookup ref
-     (org-roam-node-create
-      :title title
-      :refs  (delq nil (list ref))
-      :id    (org-id-new)))))
+       (annotation--vulpea-note-by-title-or-alias title)))))
 
-(defun zotero--literature-capture-templates (entry)
-  "Build an `annotation-capture-templates' value for ENTRY.
+(defun zotero--note-file-name (entry)
+  "Build a `vulpea-create' FILE-NAME template for ENTRY.
 Files the note under `zotero-literature-subdir' using the citekey as
-the filename when available (matching citar-org-roam), with a
-:literature: filetag and no startup line — matching a hand-made
-citar literature note."
-  (let* ((citekey (plist-get entry :citekey))
-         (fname   (if (and citekey (not (string-empty-p citekey)))
-                      (format "%s/%s.org" zotero-literature-subdir citekey)
-                    (format "%s/%%<%%Y%%m%%d%%H%%M%%S>-${slug}.org"
-                            zotero-literature-subdir))))
-    `(("d" "literature" plain "%?"
-       :if-new (file+head ,fname "#+title: ${title}\n#+filetags: :literature:")
-       :unnarrowed t
-       :immediate-finish t))))
+the filename when available (matching citar-vulpea), else a timestamp
++ slug like any other new note."
+  (let ((citekey (plist-get entry :citekey)))
+    (if (and citekey (not (string-empty-p citekey)))
+        (format "%s/%s.org" zotero-literature-subdir citekey)
+      (format "%s/%%<%%Y%%m%%d%%H%%M%%S>-${slug}.org" zotero-literature-subdir))))
 
 (defun zotero--process-entry (entry)
-  "Find or create a node for ENTRY and upsert its annotations.
+  "Find or create a note for ENTRY and upsert its annotations.
 Returns the modified file path, or nil if nothing changed."
   (save-window-excursion
     (let* ((ref         (plist-get entry :ref))
@@ -428,12 +421,13 @@ Returns the modified file path, or nil if nothing changed."
            (title       (plist-get entry :title))
            (annotations (plist-get entry :annotations))
            (incoming-updated-at (annotation--entry-updated-at entry))
-           (node   (zotero--find-or-create-node entry))
-           ;; New nodes are created with a literature template matching
-           ;; citar-org-roam's location/header.
-           (annotation-capture-templates
-            (zotero--literature-capture-templates entry))
-           (buffer (annotation--org-roam-node-open-or-create node)))
+           (existing (zotero--find-note entry))
+           ;; New notes are filed under zotero-literature-subdir with a
+           ;; :literature: filetag, matching citar-vulpea's location/header.
+           (buffer (annotation--vulpea-note-open-or-create
+                    existing title ref
+                    (zotero--note-file-name entry)
+                    "#+filetags: :literature:")))
       (with-current-buffer buffer
         (let ((stored-updated-at (annotation--max-stored-updated-at)))
           (unless (and stored-updated-at
@@ -446,16 +440,17 @@ Returns the modified file path, or nil if nothing changed."
                     (org-back-to-heading t)
                   (goto-char (point-min)))
                 ;; Persist the lookup ref (check buffer ROAM_REFS, not the
-                ;; struct slot, which may hold an unwritten ref).
-                (when ref
-                  (let ((existing (org-entry-get (point) "ROAM_REFS" t)))
-                    (unless (and existing
-                                 (string-match-p (regexp-quote ref) existing))
-                      (org-roam-ref-add ref))))
-                (org-roam-tag-add '("annotations" "zotero" "literature"))
+                ;; note struct, which may hold an unwritten ref for an
+                ;; existing note found by title rather than by ref).
+                (when (and ref existing
+                           (not (string-match-p
+                                 (regexp-quote ref)
+                                 (or (org-entry-get (point) "ROAM_REFS" t) ""))))
+                  (annotation--vulpea-add-ref ref))
+                (vulpea-buffer-tags-add '("annotations" "zotero" "literature"))
                 (when-let ((author (plist-get entry :author))
                            (slug   (annotation--slugify author)))
-                  (org-roam-tag-add (list slug)))
+                  (vulpea-buffer-tags-add (list slug)))
                 (annotation--goto-or-insert-child "Annotations")
                 (dolist (annotation annotations)
                   (save-excursion
@@ -587,16 +582,14 @@ With prefix arg, prompt for an ISO 8601 SINCE date to limit the sync."
 
 ;;;###autoload
 (defun zotero-synchronise-annotation-at-point ()
-  "Sync Zotero annotations for the citekey of the current org-roam node."
+  "Sync Zotero annotations for the citekey of the current vulpea note."
   (interactive)
-  (require 'citar-org-roam nil t)
-  (let* ((node (org-roam-node-at-point))
-         (keys (and node
-                    (fboundp 'citar-org-roam--node-cite-refs)
-                    (citar-org-roam--node-cite-refs node)))
-         (citekey (car keys)))
+  (require 'citar-vulpea nil t)
+  (let* ((citekey (car (and (fboundp 'citar-vulpea--parse-refs)
+                           (fboundp 'citar-vulpea--get-ref-property)
+                           (citar-vulpea--parse-refs (citar-vulpea--get-ref-property))))))
     (unless citekey
-      (error "No citekey found for current node"))
+      (error "No citekey found for current note"))
     (message "Zotero: syncing annotations for @%s..." citekey)
     (let* ((entries (zotero--collect-entries))
            (matched (seq-filter

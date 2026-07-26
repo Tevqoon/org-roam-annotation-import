@@ -1,4 +1,4 @@
-;;; koreader-json-backend.el --- Sync Koreader highlights with Org-roam -*- lexical-binding: t; -*-
+;;; koreader-json-backend.el --- Sync Koreader highlights with vulpea -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
 ;; Version: 0.3
@@ -35,7 +35,7 @@
 ;;
 ;; Unlike server-backed sources, KOReader JSON titles come straight from
 ;; ebook metadata and are often unreliable.  The import therefore prompts
-;; for the destination org-roam node (`koreader--select-node'): pick an
+;; for the destination vulpea note (`koreader--select-note'): pick an
 ;; existing note, or type a new title.  Book metadata (author, rating,
 ;; genre, ...) is intentionally NOT managed here -- create proper book
 ;; notes with `js-book-capture' first, then point this importer at them.
@@ -44,7 +44,7 @@
 ;;; Code:
 
 (require 'org-roam-annotation-import)
-(require 'org-roam)
+(require 'vulpea)
 (require 'json)
 
 (defcustom koreader-json-file-pattern "\\.json\\'"
@@ -106,28 +106,30 @@ matching the Wallabag backend."
           :updated-at  created-on
           :annotations annotations)))
 
-(defun koreader--select-node (default-title)
-  "Prompt for the org-roam node to receive KOReader annotations.
+(defun koreader--select-note (default-title)
+  "Prompt for the vulpea note to receive KOReader annotations.
 DEFAULT-TITLE (from the JSON metadata) pre-fills the prompt.  Selecting
-an existing note returns its node; typing a new title returns a node
-with no file, which `annotation--org-roam-node-open-or-create' files
-via `annotation-capture-templates' on first write.
+an existing note returns it; typing a new title returns a title-only
+note (nil :id), which `annotation--vulpea-note-open-or-create' files
+on first write.
 
 Book metadata is intentionally not touched here -- create proper book
 notes with `js-book-capture' first, then point this importer at them."
-  (let ((node (org-roam-node-read default-title nil nil nil
-                                  "KOReader note (select or type new title): ")))
-    (if (and node (org-roam-node-title node))
-        node
+  (let ((note (vulpea-select "KOReader note (select or type new title)"
+                             :initial-prompt default-title)))
+    (if (and note (vulpea-note-title note))
+        note
       (user-error "No note selected"))))
 
 (defun koreader--import-json-file (file)
   "Import annotations from a single KOReader JSON FILE.
-Prompts for the destination org-roam node."
+Prompts for the destination vulpea note."
   (let* ((json-data (koreader--parse-json-file file))
          (entry     (koreader--transform-json json-data))
-         (node      (koreader--select-node (plist-get entry :title))))
-    (setq entry (plist-put entry :node node))
+         (note      (koreader--select-note (plist-get entry :title))))
+    (setq entry (plist-put entry :title (vulpea-note-title note)))
+    (when (vulpea-note-id note)
+      (setq entry (plist-put entry :note note)))
     (annotation-debug 1 "Importing from: %s" file)
     (annotation-debug 2 "Title: %s, Annotations: %d"
                       (plist-get entry :title)
@@ -142,7 +144,7 @@ Prompts for the destination org-roam node."
 (defun koreader-import-json-file (file)
   "Import annotations from a KOReader JSON FILE.
 Prompts for file selection interactively, then for the destination
-org-roam node."
+vulpea note."
   (interactive
    (list (read-file-name "KOReader JSON file: "
                          annotation-default-json-directory
@@ -156,7 +158,7 @@ org-roam node."
 (defun koreader-import-json-directory (directory)
   "Import annotations from all KOReader JSON files in DIRECTORY.
 Uses `annotation-default-json-directory' if set, otherwise prompts.
-Prompts once per file for its destination org-roam node."
+Prompts once per file for its destination vulpea note."
   (interactive
    (list (read-directory-name "Directory with KOReader JSON files: "
                               annotation-default-json-directory)))

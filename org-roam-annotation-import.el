@@ -1,9 +1,9 @@
-;;; org-roam-annotation-import.el --- Sync annotation highlights with Org-roam -*- lexical-binding: t; -*-
+;;; org-roam-annotation-import.el --- Sync annotation highlights with vulpea -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
-;; Version: 0.4
-;; Package-Requires: ((emacs "27.1") (org "9.4") (org-roam "2.0"))
-;; Keywords: org, org-roam, annotations
+;; Version: 0.5
+;; Package-Requires: ((emacs "29.1") (org "9.4") (vulpea "2.0"))
+;; Keywords: org, vulpea, annotations
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -32,12 +32,12 @@
 ;; structure (e.g. Zotero) supply their own writer.
 ;;
 ;; Backends (wallabag, zotero, koreader, ...) produce entry plists
-;; which this module writes into org-roam nodes.
+;; which this module writes into vulpea notes.
 
 ;;; Code:
 
 (require 'org)
-(require 'org-roam)
+(require 'vulpea)
 (require 'subr-x)
 
 (defgroup annotation nil
@@ -137,32 +137,67 @@ different backends can never collide.  nil parts are ignored."
          (digest  (secure-hash 'sha1 payload)))
     (format "%s-%s" backend (substring digest 0 16))))
 
-;;;; Org-roam node access
+;;;; Vulpea note access
 
-(defcustom annotation-capture-templates
-  '(("d" "default" plain "%?"
-     :if-new (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
-                        "#+title: ${title}\n#+startup: content")
-     :unnarrowed t
-     :immediate-finish t))
-  "Capture templates used when creating a new node for an annotation entry.
-Backends may let-bind this to control where new notes are filed and
-what header they get (e.g. a literature-note template under
-references/ with a :literature: filetag).  Must contain a single
-template with :immediate-finish t."
+(defcustom annotation-new-note-file-name "%<%Y%m%d%H%M%S>-${slug}.org"
+  "`vulpea-create' FILE-NAME template for a newly created annotation note.
+Backends may let-bind this (see `annotation--vulpea-note-open-or-create's
+FILE-NAME-TEMPLATE argument) to file new notes somewhere specific, e.g.
+a literature backend filing under references/ by citekey."
   :group 'annotation
-  :type 'sexp)
+  :type 'string)
 
-(defun annotation--org-roam-node-open-or-create (node)
-  "Find and open or create an Org-roam NODE.
-New nodes are created via `annotation-capture-templates'."
-  (if (org-roam-node-file node)
-      (org-roam-node-visit node nil t)
-    (org-roam-capture-
-     :node node
-     :templates annotation-capture-templates
-     :props '(:finalize find-file)))
-  (current-buffer))
+(defcustom annotation-new-note-head "#+startup: content"
+  "`vulpea-create' :head template for a newly created annotation note."
+  :group 'annotation
+  :type 'string)
+
+(defun annotation--vulpea-note-by-ref (url)
+  "Find a vulpea note whose ROAM_REFS property contains URL.
+`vulpea-db-query-by-property' matches a property's whole value exactly,
+so a note with several space-separated ROAM_REFS wouldn't be found by
+matching a single URL against it -- filter after the fact instead."
+  (seq-find
+   (lambda (note)
+     (member url (split-string
+                  (or (cdr (assoc "ROAM_REFS" (vulpea-note-properties note))) "")
+                  " " t)))
+   (vulpea-db-query-by-property-key "ROAM_REFS")))
+
+(defun annotation--vulpea-note-by-title-or-alias (title)
+  "Find a vulpea note whose title or an alias matches TITLE exactly."
+  (seq-find
+   (lambda (note)
+     (or (string= (vulpea-note-title note) title)
+         (member title (vulpea-note-aliases note))))
+   (vulpea-db-query)))
+
+(defun annotation--vulpea-note-at-point ()
+  "Return the vulpea note for the ID at or above point, or nil."
+  (when-let* ((id (org-entry-get nil "ID" t)))
+    (vulpea-db-get-by-id id)))
+
+(defun annotation--vulpea-add-ref (url)
+  "Add URL to the ROAM_REFS property at point (file- or heading-level),
+unless it's already present."
+  (let* ((existing (org-entry-get nil "ROAM_REFS"))
+         (refs (if existing (split-string existing " " t) nil)))
+    (unless (member url refs)
+      (org-entry-put nil "ROAM_REFS" (string-join (append refs (list url)) " ")))))
+
+(defun annotation--vulpea-note-open-or-create (existing title url &optional file-name-template head)
+  "Return a buffer visiting the vulpea note for an annotation entry.
+EXISTING is an already-resolved `vulpea-note', or nil to create a new
+note titled TITLE (with ROAM_REFS URL, if URL is non-nil).
+FILE-NAME-TEMPLATE and HEAD override `annotation-new-note-file-name'
+and `annotation-new-note-head' for this call only."
+  (find-file-noselect
+   (vulpea-note-path
+    (or existing
+        (vulpea-create title
+                        (or file-name-template annotation-new-note-file-name)
+                        :head (or head annotation-new-note-head)
+                        :properties (when url (list (cons "ROAM_REFS" url))))))))
 
 ;;;; Heading helpers
 
@@ -399,21 +434,18 @@ If absent, `annotation--write-annotation-content' is used."
     (car (sort times #'string>))))
 
 (defun annotation--process-entry (entry)
-  "Find or create a node for ENTRY, then upsert each of its annotations.
-If ENTRY carries a :node, that node is used directly and the
+  "Find or create a note for ENTRY, then upsert each of its annotations.
+If ENTRY carries a :note, that note is used directly and the
 title/url-based resolution is skipped."
   (save-window-excursion
     (let* ((url         (plist-get entry :url))
            (title       (plist-get entry :title))
            (annotations (plist-get entry :annotations))
            (incoming-updated-at (annotation--entry-updated-at entry))
-           (node (or (plist-get entry :node)
-                     (when url (org-roam-node-from-ref url))
-                     (org-roam-node-from-title-or-alias title)
-                     (org-roam-node-create :title title
-                                           :refs (when url (list url))
-                                           :id   (org-id-new))))
-           (buffer (annotation--org-roam-node-open-or-create node)))
+           (existing (or (plist-get entry :note)
+                        (and url (annotation--vulpea-note-by-ref url))
+                        (annotation--vulpea-note-by-title-or-alias title)))
+           (buffer (annotation--vulpea-note-open-or-create existing title url)))
       (with-current-buffer buffer
         (let ((stored-updated-at (annotation--max-stored-updated-at)))
           (unless (and stored-updated-at
@@ -422,15 +454,19 @@ title/url-based resolution is skipped."
             (save-excursion
               (let ((heading-level (org-current-level)))
                 (when heading-level (org-narrow-to-subtree))
-                (when url (org-roam-ref-add url))
-                (org-roam-tag-add
-                 (delq nil (list "annotations" (plist-get entry :source-tag))))
-                (when-let ((author (plist-get entry :author))
-                           (slug   (annotation--slugify author)))
-                  (org-roam-tag-add (list slug)))
                 (if heading-level
                     (org-back-to-heading t)
                   (goto-char (point-min)))
+                (when (and url existing
+                           (not (member url (split-string
+                                             (or (cdr (assoc "ROAM_REFS" (vulpea-note-properties existing))) "")
+                                             " " t))))
+                  (annotation--vulpea-add-ref url))
+                (vulpea-buffer-tags-add
+                 (delq nil (list "annotations" (plist-get entry :source-tag))))
+                (when-let ((author (plist-get entry :author))
+                           (slug   (annotation--slugify author)))
+                  (vulpea-buffer-tags-add (list slug)))
                 (annotation--goto-or-insert-child "Annotations")
                 (dolist (annotation annotations)
                   (save-excursion

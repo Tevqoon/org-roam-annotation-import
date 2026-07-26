@@ -17,6 +17,7 @@
 
 (require 'cl-lib)
 (require 'anki-editor)
+(require 'vulpea)
 (require 'org-roam-annotation-import) ; for `annotation--recently-modified-files'
 
 ;;;; ----------------------------------------------------------------
@@ -24,17 +25,14 @@
 ;;;; ----------------------------------------------------------------
 
 (defun js/anki--files-with-tags (required &optional excluded)
-  "Return org-roam files whose nodes carry all REQUIRED tags and no EXCLUDED tag.
+  "Return vulpea note files that carry all REQUIRED tags and no EXCLUDED tag.
 REQUIRED and EXCLUDED are lists of tag strings."
   (delete-dups
-   (delq nil
-         (mapcar
-          (lambda (n)
-            (let ((tags (org-roam-node-tags n)))
-              (when (and (cl-every  (lambda (tg) (member tg tags)) required)
-                         (cl-notany (lambda (tg) (member tg tags)) (or excluded '())))
-                (org-roam-node-file n))))
-          (org-roam-node-list)))))
+   (mapcar #'vulpea-note-path
+           (seq-remove
+            (lambda (n) (cl-some (lambda (tg) (member tg (vulpea-note-tags n)))
+                                 (or excluded '())))
+            (vulpea-db-query-by-tags-every required)))))
 
 ;;;; ----------------------------------------------------------------
 ;;;; Generic pusher (shared error-reporting wrapper)
@@ -117,11 +115,11 @@ Reads `annotation--recently-modified-files'."
 ;; To make per-source splitting exact, add a source tag in each backend:
 ;;
 ;;   Wallabag (wallabag-backend.el, in the tag-add call of the entry
-;;   processor):  (org-roam-tag-add '("annotations" "wallabag"))
+;;   processor):  (vulpea-buffer-tags-add '("annotations" "wallabag"))
 ;;
 ;;   KOReader (koreader-json-backend.el): the file-based backends route
 ;;   through the CORE `annotation--process-entry', which hardcodes
-;;   (org-roam-tag-add '("annotations")).  To tag per source you'd add a
+;;   (vulpea-buffer-tags-add '("annotations")).  To tag per source you'd add a
 ;;   :source-tag entry key and have the core add it, or wrap the call.
 ;;   Simplest: have each backend set the node's tag after import.
 ;; ----------------------------------------------------------------

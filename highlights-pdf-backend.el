@@ -1,4 +1,4 @@
-;;; highlights-pdf-backend.el --- Import Highlights/PDF annotations into Org-roam -*- lexical-binding: t; -*-
+;;; highlights-pdf-backend.el --- Import Highlights/PDF annotations into vulpea -*- lexical-binding: t; -*-
 ;; Author: Jure Smolar
 ;; URL: https://github.com/Tevqoon/org-roam-annotation-import
 ;; Version: 0.1
@@ -18,7 +18,7 @@
 ;; with PyMuPDF; there is no proprietary sidecar.
 ;;
 ;; Architecture mirrors `koreader-json-backend':
-;;   PDF --(PyMuPDF)--> JSON --(this file)--> org-roam
+;;   PDF --(PyMuPDF)--> JSON --(this file)--> vulpea
 ;; This file is the thin JSON->roam half.  It is ~the KOReader backend
 ;; with two differences:
 ;;
@@ -35,13 +35,13 @@
 ;;      Front body, instead of quoted text.
 ;;
 ;; As with KOReader, PDF metadata titles are unreliable, so the import
-;; prompts for the destination org-roam node.  Create proper book/paper
+;; prompts for the destination vulpea note.  Create proper book/paper
 ;; notes with `js-book-capture' first, then point this importer at them.
 
 ;;; Code:
 
 (require 'org-roam-annotation-import)
-(require 'org-roam)
+(require 'vulpea)
 (require 'json)
 
 (defcustom highlights-pdf-json-file-pattern "\\.json\\'"
@@ -73,7 +73,7 @@ you keep the script elsewhere.  Used by `highlights-pdf-import-pdf'."
   "Optional function to rewrite an extracted image path before linking.
 Called with the absolute PNG path the extractor wrote and must return
 the path to store in the org [[file:...]] link.  Use this to move images
-under your org-roam image tree, e.g. into a per-note attachment dir.
+under your vulpea image tree, e.g. into a per-note attachment dir.
 When nil, the extractor's path is linked as-is."
   :group 'annotation
   :type '(choice (const :tag "Link as-is" nil) function))
@@ -164,28 +164,30 @@ annotations use the default writer."
           :updated-at  updated-on
           :annotations annotations)))
 
-;;;; Node selection (mirrors koreader--select-node)
+;;;; Note selection (mirrors koreader--select-note)
 
-(defun highlights-pdf--select-node (default-title)
-  "Prompt for the org-roam node to receive annotations.
+(defun highlights-pdf--select-note (default-title)
+  "Prompt for the vulpea note to receive annotations.
 DEFAULT-TITLE (from PDF metadata) pre-fills the prompt.  Selecting an
-existing note returns its node; typing a new title returns a fresh node
-that `annotation--org-roam-node-open-or-create' files on first write."
-  (let ((node (org-roam-node-read default-title nil nil nil
-                                  "PDF note (select or type new title): ")))
-    (if (and node (org-roam-node-title node))
-        node
+existing note returns it; typing a new title returns a title-only note
+that `annotation--vulpea-note-open-or-create' files on first write."
+  (let ((note (vulpea-select "PDF note (select or type new title)"
+                             :initial-prompt default-title)))
+    (if (and note (vulpea-note-title note))
+        note
       (user-error "No note selected"))))
 
 ;;;; Import a JSON file
 
 (defun highlights-pdf--import-json-file (file)
   "Import annotations from a single extractor JSON FILE.
-Prompts for the destination org-roam node."
+Prompts for the destination vulpea note."
   (let* ((json-data (highlights-pdf--parse-json-file file))
          (entry     (highlights-pdf--transform-json json-data))
-         (node      (highlights-pdf--select-node (plist-get entry :title))))
-    (setq entry (plist-put entry :node node))
+         (note      (highlights-pdf--select-note (plist-get entry :title))))
+    (setq entry (plist-put entry :title (vulpea-note-title note)))
+    (when (vulpea-note-id note)
+      (setq entry (plist-put entry :note note)))
     (annotation-debug 1 "Importing from: %s" file)
     (annotation-debug 2 "Title: %s, Annotations: %d"
                       (plist-get entry :title)
@@ -201,7 +203,7 @@ Prompts for the destination org-roam node."
 ;;;###autoload
 (defun highlights-pdf-import-json-file (file)
   "Import annotations from an extractor JSON FILE.
-Prompts for the file, then for the destination org-roam node."
+Prompts for the file, then for the destination vulpea note."
   (interactive
    (list (read-file-name "PDF-annotation JSON file: "
                          annotation-default-json-directory
@@ -214,7 +216,7 @@ Prompts for the file, then for the destination org-roam node."
 ;;;###autoload
 (defun highlights-pdf-import-json-directory (directory)
   "Import all extractor JSON files in DIRECTORY.
-Prompts once per file for its destination org-roam node."
+Prompts once per file for its destination vulpea note."
   (interactive
    (list (read-directory-name "Directory with PDF-annotation JSON files: "
                               annotation-default-json-directory)))
@@ -256,7 +258,7 @@ traceback in the process buffer into an actionable message."
 (defun highlights-pdf-import-pdf (pdf)
   "Run the extractor on PDF, then import the resulting JSON.
 Writes JSON (and any figure PNGs) next to PDF, then prompts for the
-destination org-roam node.  Requires `highlights-pdf-extractor-script'
+destination vulpea note.  Requires `highlights-pdf-extractor-script'
 and a `highlights-pdf-python' with PyMuPDF installed."
   (interactive (list (read-file-name "PDF file: " nil nil t nil
                                      (lambda (f) (or (file-directory-p f)

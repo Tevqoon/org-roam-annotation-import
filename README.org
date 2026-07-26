@@ -5,7 +5,7 @@
 
 *This whole thing is vibecoded.* It was built iteratively with an LLM to
 scratch a personal itch, is *very experimental*, carries *no warranty and no
-support*, and may eat your notes. Read the code, keep your org-roam under
+support*, and may eat your notes. Read the code, keep your notes under
 version control, and try it on a throwaway directory first. You have been
 warned.
 
@@ -16,7 +16,7 @@ The Anki module is incomplete.
 * What it is
 
 An Emacs package that pulls highlights/annotations from several sources
-(Wallabag, Zotero, KOReader) into [[https://www.orgroam.com/][org-roam]] nodes, and optionally exports
+(Wallabag, Zotero, KOReader) into vulpea notes, and optionally exports
 each annotation as an [[https://github.com/anki-editor/anki-editor][anki-editor]] flashcard. The insertion engine is
 separated from the source-specific backends.
 
@@ -27,18 +27,18 @@ separated from the source-specific backends.
         │  produces a list of ENTRY plists
         ▼
   org-roam-annotation-import.el   ← the core engine
-        │  per entry: find/create org-roam node
+        │  per entry: find/create vulpea note
         │  per annotation: upsert a heading under "* Annotations"
         ▼
-  org-roam note on disk  ──(anki-editor)──▶  Anki
+  vulpea note on disk  ──(anki-editor)──▶  Anki
 #+end_example
 
 ** Core — =org-roam-annotation-import.el=
 
 Source-agnostic. Given entry plists it:
 
-- Finds an org-roam node by ROAM_REF / title, or creates one via
-  =annotation-capture-templates=.
+- Finds a vulpea note by ROAM_REF / title, or creates one via
+  =annotation-new-note-file-name= / =annotation-new-note-head=.
 - Upserts each annotation as a heading under =* Annotations= (optionally
   nested under a =:chapter=), keyed by an =Annotation-ID= property.
 - Does *incremental sync*: an annotation whose stored =Updated-at= matches
@@ -78,7 +78,7 @@ A *backend* only has to build entry plists and call
 
 - =emacs= 27.1+ (built with native JSON / libjansson — needed by
   =json-parse-buffer= in the KOReader backend).
-- =org= 9.4+, =org-roam= 2.0+.
+- =org= 9.4+, =vulpea= 2.0+.
 - [[https://github.com/tkf/emacs-request][=request=]] — *required by the Wallabag and Zotero backends*. (Only declared
   in zotero's header; install it regardless if you use either.)
 - [[https://github.com/anki-editor/anki-editor][=anki-editor=]] — only if you want Anki export / the push helpers.
@@ -98,9 +98,9 @@ A *backend* only has to build entry plists and call
   on this computer to communicate with Zotero"/ enabled (local API on
   =localhost:23119=).
 - [[https://retorque.re/zotero-better-bibtex/][Better BibTeX]] — used to map Zotero item keys to citekeys so annotations
-  land in the same note as your =citar-org-roam= literature note. Optional:
+  land in the same note as your =citar-vulpea= literature note. Optional:
   without it, matching falls back to =zotero://select= URL then title.
-- =citar-org-roam= — *optional*, only for =zotero-synchronise-annotation-at-point=.
+- =citar-vulpea= — *optional*, only for =zotero-synchronise-annotation-at-point=.
 
 *KOReader*
 - The KOReader "Export highlights" plugin, set to *JSON* format. Point the
@@ -148,20 +148,20 @@ A *backend* only has to build entry plists and call
 
 Single =use-package= block. Uses =:vc= to install from GitHub; swap in
 =:load-path "/path/to/clone/"= if you cloned it manually. =:demand t= +
-=:after= guarantees =org=, =org-roam= and =anki-editor= are loaded before the
+=:after= guarantees =org=, =vulpea= and =anki-editor= are loaded before the
 backends are =require='d in =:config=.
 
 #+begin_src emacs-lisp
   (use-package org-roam-annotation-import
     :demand t
-    :after (org org-roam anki-editor)
+    :after (org vulpea anki-editor)
     :vc (:url "https://github.com/Tevqoon/org-roam-annotation-import" :rev :newest)
     ;; :load-path "~/Documents/repos/org-roam-annotation-import/"  ; if cloned
     :custom
     (annotation-anki-deck "Annotations")            ; default deck
     (annotation-auto-manual t)                       ; freeze quotes after 1st import
     (zotero-anki-deck "Zotero")                      ; deck for Zotero cards
-    (zotero-literature-subdir "references")          ; match your citar-org-roam subdir
+    (zotero-literature-subdir "references")          ; match your citar-vulpea-notes-directory
     ;; (annotation-default-json-directory "~/koreader-exports/")
     :config
     ;; Backends + Anki push helpers all ship in this same repo.
@@ -180,10 +180,10 @@ backends are =require='d in =:config=.
                      ('gnu/linux (call-process "xdg-open" nil nil nil uri))
                      (_          (browse-url uri)))))))
     :bind
-    (;; Sync (pull from source into org-roam)
+    (;; Sync (pull from source into vulpea)
      ("C-c n p r a" . wallabag-synchronise-annotations)
      ("C-c n p r z" . zotero-synchronise-annotations)
-     ;; Push (org-roam → Anki via anki-editor)
+     ;; Push (vulpea → Anki via anki-editor)
      ;; Sorry, the dedicated anki export functions areincomplete
      ;; ("C-c n p z"   . js/anki-push-zotero)
      ;; ("C-c n p w"   . js/anki-push-wallabag)
@@ -203,7 +203,7 @@ If you don't use Anki, drop =anki-editor= from =:after=, the
 | =wallabag-synchronise-annotations=       | Pull all annotated Wallabag entries               |
 | =wallabag-reset-tokens=                  | Drop cached OAuth tokens, force re-auth           |
 | =zotero-synchronise-annotations=         | Pull all Zotero annots (=C-u= → prompt SINCE date) |
-| =zotero-synchronise-annotation-at-point= | Sync only the current node's citekey              |
+| =zotero-synchronise-annotation-at-point= | Sync only the current note's citekey              |
 | =zotero-ping=                            | Check the Zotero local API is reachable           |
 | =koreader-import-json-file=              | Import one KOReader JSON export                   |
 | =koreader-import-json-directory=         | Import every JSON file in a directory             |
